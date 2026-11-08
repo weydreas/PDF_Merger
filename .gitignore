@@ -1,0 +1,13 @@
+# Never put patient PDF files, raw scans or generated output in git.
+*.pdf
+*.PDF
+/input/*
+/output/*
+!/input/.gitkeep
+!/output/.gitkeep
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.tmp
+.DS_Store
