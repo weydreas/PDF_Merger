@@ -112,9 +112,9 @@ def process(input_dir: Path, output_dir: Path, *, overwrite: bool = False, dry_r
     groups, ignored = discover_groups(input_dir, output_dir, recursive=recursive)
     result = Result(files_ignored=len(ignored), groups_planned=len(groups))
     for path in ignored:
-        print(f"IGNORED (invalid/missing YYYY-MM-DD-): {path.relative_to(input_dir)}")
+        print(f"ПРОПУЩЕН (нет корректной даты YYYY-MM-DD-): {path.relative_to(input_dir)}")
     if not groups:
-        print("No PDFs with a valid YYYY-MM-DD- prefix found.")
+        print("Не найдено PDF с корректным префиксом YYYY-MM-DD-.")
         return result
 
     if not dry_run:
@@ -122,31 +122,31 @@ def process(input_dir: Path, output_dir: Path, *, overwrite: bool = False, dry_r
 
     for day, paths in groups.items():
         target = output_dir / f"{day}.pdf"
-        print(f"\n{day}: {len(paths)} source PDF(s) -> {target.name}")
+        print(f"\n{day}: {len(paths)} исходных PDF -> {target.name}")
         for index, source in enumerate(paths, start=1):
             print(f"  {index}. {source.relative_to(input_dir)}")
         if target.exists() and not overwrite:
-            print("  SKIPPED: destination already exists (use --overwrite to replace)")
+            print("  ПРОПУЩЕНО: результат уже существует (для замены нужен --overwrite)")
             result.groups_skipped += 1
             continue
         if dry_run:
-            print("  DRY RUN: no files written")
+            print("  ПРОВЕРКА: файлы не записываются")
             continue
         try:
             _write_atomic(paths, target, overwrite=overwrite)
         except FileExistsError:
-            print("  SKIPPED: destination was created by another process")
+            print("  ПРОПУЩЕНО: результат уже создан другим процессом")
             result.groups_skipped += 1
         except Exception as exc:
-            print(f"  ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
+            print(f"  ОШИБКА: {type(exc).__name__}: {exc}", file=sys.stderr)
             result.groups_failed += 1
         else:
-            print("  CREATED")
+            print("  СОЗДАНО")
             result.groups_written += 1
 
     print(
-        f"\nSummary: {result.groups_written} created; {result.groups_skipped} skipped; "
-        f"{result.groups_failed} failed; {result.files_ignored} invalid-name PDF(s)."
+        f"\nИтог: {result.groups_written} создано; {result.groups_skipped} пропущено; "
+        f"{result.groups_failed} ошибок; {result.files_ignored} PDF с некорректной датой."
     )
     return result
 
@@ -164,7 +164,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         report = process(args.input_dir, args.output_dir, overwrite=args.overwrite, dry_run=args.dry_run, recursive=args.recursive)
     except (OSError, ValueError) as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+        print(f"ОШИБКА: {exc}", file=sys.stderr)
         return 2
     return 1 if report.groups_failed else 0
 
