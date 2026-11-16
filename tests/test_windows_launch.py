@@ -34,7 +34,7 @@ class WindowsConsoleFlowTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
-        for filename in ('merge_windows.ps1', 'pdf_merger.py', 'requirements.txt'):
+        for filename in ('merge_windows.ps1', 'pdf_merger.py', 'ai_renamer.py', 'requirements.txt'):
             shutil.copy2(ROOT / filename, self.root / filename)
 
     def invoke_ps(self, answer=''):
@@ -81,6 +81,31 @@ class WindowsConsoleFlowTests(unittest.TestCase):
         again = self.invoke_ps('1\n')
         self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
         self.assertEqual([int(page.mediabox.width) for page in PdfReader(merged).pages], [111, 222])
+
+
+    def test_nonstandard_name_requires_explicit_ai_consent(self):
+        self.assertEqual(self.invoke_ps().returncode, 0)
+        writer = PdfWriter()
+        writer.add_blank_page(width=100, height=100)
+        with (self.root / 'input' / 'scan.pdf').open('wb') as handle:
+            writer.write(handle)
+        writer.close()
+
+        canceled = self.invoke_ps('1\n0\n')
+        self.assertEqual(canceled.returncode, 0, canceled.stdout + canceled.stderr)
+        self.assertIn('[2]', canceled.stdout)
+        self.assertFalse((self.root / 'output' / 'scan.pdf').exists())
+
+        offline = self.invoke_ps('1\n2\n')
+        self.assertEqual(offline.returncode, 0, offline.stdout + offline.stderr)
+        self.assertTrue((self.root / 'input' / 'scan.pdf').exists())
+        self.assertFalse(any((self.root / 'output').glob('*.pdf')))
+
+        # Missing key is reported; no request is made or PDF renamed.
+        ai = self.invoke_ps('1\n1\n')
+        self.assertNotEqual(ai.returncode, 0)
+        self.assertIn('PDF_MERGER_API_KEY', ai.stdout + ai.stderr)
+        self.assertTrue((self.root / 'input' / 'scan.pdf').exists())
 
 
 if __name__ == '__main__':

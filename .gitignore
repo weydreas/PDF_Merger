@@ -9,3 +9,7 @@ __pycache__/
 .pytest_cache/
 *.tmp
 .DS_Store
+# API credentials belong only in ignored local environment files.
+.env
+.env.*
+!.env.example
