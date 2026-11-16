@@ -109,6 +109,16 @@ class AIRenameTests(unittest.TestCase):
                 self.assertEqual(config.api_key, 'test-secret')
                 self.assertEqual(config.model, active)
 
+    def test_two_uncommented_model_lines_fail_closed(self):
+        self.env.write_text(
+            'PDF_MERGER_API_KEY=test-secret\n'
+            'PDF_MERGER_AI_MODEL=gpt-4o-mini\n'
+            'PDF_MERGER_AI_MODEL=gpt-6-luna\n',
+            encoding='utf-8',
+        )
+        with self.assertRaisesRegex(RenameError, 'несколько активных строк'):
+            load_config(self.env)
+
     def test_no_model_line_defaults_to_luna(self):
         self.env.write_text('PDF_MERGER_API_KEY=test-secret\n', encoding='utf-8')
         self.assertEqual(load_config(self.env).model, 'gpt-6-luna')
