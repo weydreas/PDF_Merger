@@ -22,6 +22,8 @@ $PythonInVenv = Join-Path $ProjectRoot '.venv\Scripts\python.exe'
 $Requirements = Join-Path $ProjectRoot 'requirements.txt'
 $MergeProgram = Join-Path $ProjectRoot 'pdf_merger.py'
 $DependencyCheck = Join-Path $ProjectRoot 'dependency_check.py'
+$EnvTemplate = Join-Path $ProjectRoot '.env.example'
+$EnvConfig = Join-Path $ProjectRoot '.env'
 
 function Assert-FolderOrCreate([string]$Path) {
     if (Test-Path -LiteralPath $Path -PathType Leaf) {
@@ -34,6 +36,30 @@ function Assert-FolderOrCreate([string]$Path) {
     }
     Write-Host "  [READY]   $Path" -ForegroundColor DarkGray
     return $false
+}
+
+function Ensure-LocalEnv {
+    # .env is local-only and ignored by Git. Never overwrite existing keys.
+    if (Test-Path -LiteralPath $EnvConfig -PathType Leaf) {
+        return
+    }
+    if (Test-Path -LiteralPath $EnvConfig -PathType Container) {
+        throw "Ожидался файл .env, но обнаружена папка: $EnvConfig"
+    }
+    if (-not (Test-Path -LiteralPath $EnvTemplate -PathType Leaf)) {
+        Write-Host 'ПРЕДУПРЕЖДЕНИЕ: шаблон .env.example отсутствует. Офлайн-объединение доступно; для AI потребуется .env.' -ForegroundColor Yellow
+        return
+    }
+
+    # Overwrite disabled: a concurrently-created .env is never replaced.
+    try {
+        [System.IO.File]::Copy($EnvTemplate, $EnvConfig, $false)
+    } catch [System.IO.IOException] {
+        if (-not (Test-Path -LiteralPath $EnvConfig -PathType Leaf)) { throw }
+        return
+    }
+    Write-Host '  [CREATED] .env из .env.example' -ForegroundColor Green
+    Write-Host '  Для AI откройте .env и замените "insert your key here" своим API-ключом.'
 }
 
 function Find-PythonLauncher {
@@ -133,6 +159,7 @@ function Invoke-InteractiveMerger {
 
     $createdInput = Assert-FolderOrCreate $InputDir
     $createdOutput = Assert-FolderOrCreate $OutputDir
+    Ensure-LocalEnv
     $python = Ensure-LocalPython
     if ($null -eq $python) { return 0 }
     if ($createdInput -or $createdOutput) {

@@ -73,10 +73,18 @@ def load_config(env_file: Path) -> AIConfig:
         return os.environ.get(name) or values.get(name) or default
 
     key = pick("PDF_MERGER_API_KEY").strip()
-    if not key:
+    placeholders = {
+        "insert your key here",
+        "replace-with-your-api-key",
+        "your-own-api-key",
+        "your_api_key_here",
+        "ваш_ключ",
+    }
+    if not key or key.casefold() in placeholders:
         raise RenameError(
-            f"Для AI-переименования укажите PDF_MERGER_API_KEY в {env_file} "
-            "(пример: .env.example) или в переменных окружения. "
+            f"Для AI-переименования замените 'insert your key here' реальным "
+            f"PDF_MERGER_API_KEY в {env_file} (см. .env.example) "
+            "или задайте его в переменных окружения. "
             "Для локального пропуска неверных имён запустите без --rename-with-ai."
         )
     url = pick("PDF_MERGER_API_URL", DEFAULT_API_URL).strip()
