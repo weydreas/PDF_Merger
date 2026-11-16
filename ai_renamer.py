@@ -57,12 +57,18 @@ def _env_values(path: Path) -> dict[str, str]:
         if "=" not in line:
             continue
         name, val = line.split("=", 1)
-        if name.strip() not in {"PDF_MERGER_API_KEY", "PDF_MERGER_API_URL", "PDF_MERGER_AI_MODEL"}:
+        name = name.strip()
+        if name not in {"PDF_MERGER_API_KEY", "PDF_MERGER_API_URL", "PDF_MERGER_AI_MODEL"}:
             continue
+        if name == "PDF_MERGER_AI_MODEL" and name in values:
+            raise RenameError(
+                f"В {path} несколько активных строк PDF_MERGER_AI_MODEL. "
+                "Оставьте одну строку, вторую закомментируйте символом #."
+            )
         val = val.strip()
         if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
             val = val[1:-1]
-        values[name.strip()] = val
+        values[name] = val
     return values
 
 
