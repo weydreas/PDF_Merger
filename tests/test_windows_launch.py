@@ -34,7 +34,7 @@ class WindowsConsoleFlowTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
-        for filename in ('merge_windows.ps1', 'pdf_merger.py', 'ai_renamer.py', 'dependency_check.py', 'requirements.txt'):
+        for filename in ('merge_windows.ps1', 'pdf_merger.py', 'ai_renamer.py', 'dependency_check.py', 'requirements.txt', '.env.example'):
             shutil.copy2(ROOT / filename, self.root / filename)
 
     def invoke_ps(self, answer=''):
@@ -68,6 +68,12 @@ class WindowsConsoleFlowTests(unittest.TestCase):
         self.assertFalse((self.root / '.venv').exists())
         self.assertIn('[CREATED]', canceled.stdout)
         self.assertIn('Необходимо установить дополнительные библиотеки', canceled.stdout)
+        self.assertTrue((self.root / '.env').is_file())
+        self.assertEqual(
+            (self.root / '.env').read_bytes(),
+            (self.root / '.env.example').read_bytes(),
+        )
+        self.assertIn('insert your key here', (self.root / '.env').read_text(encoding='utf-8'))
 
         approved = self.invoke_ps('\n')
         self.assertEqual(approved.returncode, 0, approved.stdout + approved.stderr)
@@ -80,6 +86,27 @@ class WindowsConsoleFlowTests(unittest.TestCase):
         self.assertNotIn('Нажмите Enter для установки', repeated.stdout)
         self.assertNotIn('Устанавливаются библиотеки', repeated.stdout)
         self.assertIn('Зависимости установлены', repeated.stdout)
+
+    def test_env_with_user_key_is_not_overwritten(self):
+        existing = self.root / '.env'
+        existing.write_text(
+            'PDF_MERGER_API_KEY=local-test-value\\n'.replace('\\n', '\n'),
+            encoding='utf-8',
+        )
+        first = self.invoke_ps('0\n')
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.assertEqual(existing.read_text(encoding='utf-8'), 'PDF_MERGER_API_KEY=local-test-value\n')
+        second = self.invoke_ps('0\n')
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertEqual(existing.read_text(encoding='utf-8'), 'PDF_MERGER_API_KEY=local-test-value\n')
+        self.assertNotIn('[CREATED] .env', first.stdout + second.stdout)
+
+    def test_missing_template_does_not_block_offline_setup(self):
+        (self.root / '.env.example').unlink()
+        first = self.invoke_ps('0\n')
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.assertIn('шаблон .env.example отсутствует', first.stdout)
+        self.assertFalse((self.root / '.env').exists())
 
     def test_yes_no_flow_and_pages(self):
         self.assertEqual(self.invoke_ps('\n').returncode, 0)
