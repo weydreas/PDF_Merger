@@ -21,6 +21,7 @@ $OutputDir = Join-Path $ProjectRoot 'output'
 $PythonInVenv = Join-Path $ProjectRoot '.venv\Scripts\python.exe'
 $Requirements = Join-Path $ProjectRoot 'requirements.txt'
 $MergeProgram = Join-Path $ProjectRoot 'pdf_merger.py'
+$DependencyCheck = Join-Path $ProjectRoot 'dependency_check.py'
 
 function Assert-FolderOrCreate([string]$Path) {
     if (Test-Path -LiteralPath $Path -PathType Leaf) {
@@ -60,9 +61,44 @@ function Ensure-LocalPython {
     if (-not (Test-Path -LiteralPath $Requirements -PathType Leaf)) {
         throw "Не найден список зависимостей: $Requirements"
     }
+    if (-not (Test-Path -LiteralPath $DependencyCheck -PathType Leaf)) {
+        throw "Не найден файл проверки зависимостей: $DependencyCheck"
+    }
 
-    if (-not (Test-Path -LiteralPath $PythonInVenv -PathType Leaf)) {
+    $createVenv = -not (Test-Path -LiteralPath $PythonInVenv -PathType Leaf)
+    $launcher = $null
+    if ($createVenv) {
+        # Check for Python before asking permission to install packages.
         $launcher = Find-PythonLauncher
+    } else {
+        # No network access: verify all requirements and their version constraints.
+        & $PythonInVenv $DependencyCheck $Requirements | Out-Host
+        $checkCode = $LASTEXITCODE
+        if ($checkCode -eq 0) {
+            return $PythonInVenv
+        }
+        if ($checkCode -ne 1) {
+            throw 'Не удалось проверить зависимости. Проверьте Python и requirements.txt.'
+        }
+    }
+
+    Write-Host ''
+    Write-Host 'Необходимо установить дополнительные библиотеки на этом компьютере.' -ForegroundColor Yellow
+    Write-Host 'Это потребуется только один раз (или после изменения зависимостей).' -ForegroundColor Yellow
+    Write-Host 'Для загрузки библиотек потребуется интернет. PDF-файлы никуда не отправляются.'
+    Write-Host 'Нажмите Enter для установки. Для отмены введите 0.'
+    do {
+        $installChoice = Read-Host 'Enter или 1 - установить, 0 - отменить'
+        if ($installChoice -eq '0' -or ($null -eq $installChoice -and [Console]::IsInputRedirected)) {
+            # EOF in unattended launches must not silently authorize network installs.
+            Write-Host 'Установка отменена. Файлы не изменены.'
+            return $null
+        }
+        if ([string]::IsNullOrEmpty($installChoice) -or $installChoice -eq '1') { break }
+        Write-Host 'Нажмите Enter, 1 или 0.' -ForegroundColor Yellow
+    } while ($true)
+
+    if ($createVenv) {
         Write-Host 'Создаётся локальная среда Python (.venv)...' -ForegroundColor Yellow
         $launcherExe = $launcher.Executable
         $launcherPrefix = @($launcher.Prefix)
@@ -73,15 +109,17 @@ function Ensure-LocalPython {
         throw 'Среда Python была создана некорректно. Проверьте установку Python.'
     }
 
-    # Avoid pip/network on repeat runs. Source PDFs are never given to pip.
-    & $PythonInVenv -c 'import importlib.util,sys;sys.exit(0 if importlib.util.find_spec("pypdf") else 1)'
+    Write-Host 'Устанавливаются библиотеки из requirements.txt...' -ForegroundColor Cyan
+    & $PythonInVenv -m pip install --disable-pip-version-check -r $Requirements | Out-Host
     if ($LASTEXITCODE -ne 0) {
-        Write-Host 'Устанавливается библиотека pypdf (интернет нужен только для установки кода)...' -ForegroundColor Yellow
-        & $PythonInVenv -m pip install -r $Requirements | Out-Host
-        if ($LASTEXITCODE -ne 0) {
-            throw 'Не удалось установить pypdf. Проверьте подключение к интернету и запустите ещё раз.'
-        }
+        throw 'Не удалось установить библиотеки. Проверьте интернет и повторите запуск start.cmd.'
     }
+
+    & $PythonInVenv $DependencyCheck $Requirements | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        throw 'После установки зависимости не прошли проверку. Обработка не запускалась.'
+    }
+    Write-Host 'Установка завершена. При следующих запусках библиотеки будут проверяться автоматически.' -ForegroundColor Green
     return $PythonInVenv
 }
 
@@ -95,6 +133,8 @@ function Invoke-InteractiveMerger {
 
     $createdInput = Assert-FolderOrCreate $InputDir
     $createdOutput = Assert-FolderOrCreate $OutputDir
+    $python = Ensure-LocalPython
+    if ($null -eq $python) { return 0 }
     if ($createdInput -or $createdOutput) {
         Write-Host ''
         Write-Host 'Рабочие папки подготовлены. Обработка не запускалась.' -ForegroundColor Yellow
@@ -130,7 +170,6 @@ function Invoke-InteractiveMerger {
 
     Write-Host ''
     Write-Host 'Проверка имён PDF и объединение по дате...' -ForegroundColor Cyan
-    $python = Ensure-LocalPython
     & $python $MergeProgram --check-names | Out-Host
     $checkCode = $LASTEXITCODE
     if ($checkCode -notin @(0, 3)) {

@@ -34,31 +34,55 @@ class WindowsConsoleFlowTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
-        for filename in ('merge_windows.ps1', 'pdf_merger.py', 'ai_renamer.py', 'requirements.txt'):
+        for filename in ('merge_windows.ps1', 'pdf_merger.py', 'ai_renamer.py', 'dependency_check.py', 'requirements.txt'):
             shutil.copy2(ROOT / filename, self.root / filename)
 
     def invoke_ps(self, answer=''):
+        # PowerShell 5.1 native subprocesses may consume piped stdin before
+        # Read-Host runs. Stub *only the host input function* in this test process.
+        # Production start.cmd still uses the real interactive Read-Host.
+        answers = answer.splitlines()
+        literals = ", ".join("'" + value.replace("'", "''") + "'" for value in answers)
+        script_path = str(self.root / 'merge_windows.ps1').replace("'", "''")
+        command = (
+            "$global:__testAnswers = @(" + literals + "); "
+            "$global:__testIndex = 0; "
+            "function global:Read-Host { param([string]$Prompt) "
+            "if ($global:__testIndex -ge $global:__testAnswers.Count) { return '0' }; "
+            "$answer = $global:__testAnswers[$global:__testIndex]; "
+            "$global:__testIndex++; return [string]$answer }; "
+            "& '" + script_path + "'"
+        )
         return subprocess.run(
             ["powershell.exe", "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass",
-             "-File", str(self.root / 'merge_windows.ps1')],
-            input=answer, capture_output=True, text=True, encoding='utf-8', errors='replace',
+             "-Command", command],
+            input='', capture_output=True, text=True, encoding='utf-8', errors='replace',
             timeout=180,
         )
 
-    def test_first_run_creates_folders_and_stops(self):
-        first = self.invoke_ps()
-        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+    def test_first_run_prompts_installs_and_subsequent_run_skips_install(self):
+        canceled = self.invoke_ps('0\n')
+        self.assertEqual(canceled.returncode, 0, canceled.stdout + canceled.stderr)
         self.assertTrue((self.root / 'input').is_dir())
         self.assertTrue((self.root / 'output').is_dir())
         self.assertFalse((self.root / '.venv').exists())
-        self.assertIn('[CREATED]', first.stdout)
-        second = self.invoke_ps()
-        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
-        self.assertFalse((self.root / '.venv').exists())
-        self.assertIn('[READY]', second.stdout)
+        self.assertIn('[CREATED]', canceled.stdout)
+        self.assertIn('Необходимо установить дополнительные библиотеки', canceled.stdout)
+
+        approved = self.invoke_ps('\n')
+        self.assertEqual(approved.returncode, 0, approved.stdout + approved.stderr)
+        self.assertTrue((self.root / '.venv' / 'Scripts' / 'python.exe').exists())
+        self.assertIn('Установка завершена', approved.stdout)
+        self.assertIn('[READY]', approved.stdout)
+
+        repeated = self.invoke_ps()
+        self.assertEqual(repeated.returncode, 0, repeated.stdout + repeated.stderr)
+        self.assertNotIn('Нажмите Enter для установки', repeated.stdout)
+        self.assertNotIn('Устанавливаются библиотеки', repeated.stdout)
+        self.assertIn('Зависимости установлены', repeated.stdout)
 
     def test_yes_no_flow_and_pages(self):
-        self.assertEqual(self.invoke_ps().returncode, 0)
+        self.assertEqual(self.invoke_ps('\n').returncode, 0)
         for filename, width in [('2026-03-02-02-Beta.pdf', 222),
                                 ('2026-03-02-01-Alpha.pdf', 111)]:
             writer = PdfWriter()
@@ -71,7 +95,7 @@ class WindowsConsoleFlowTests(unittest.TestCase):
         self.assertEqual(canceled.returncode, 0, canceled.stdout + canceled.stderr)
         self.assertIn('[1]', canceled.stdout)
         self.assertFalse((self.root / 'output' / '2026-03-02.pdf').exists())
-        self.assertFalse((self.root / '.venv').exists())
+        self.assertTrue((self.root / '.venv').exists())
 
         approved = self.invoke_ps('1\n')
         self.assertEqual(approved.returncode, 0, approved.stdout + approved.stderr)
@@ -83,8 +107,18 @@ class WindowsConsoleFlowTests(unittest.TestCase):
         self.assertEqual([int(page.mediabox.width) for page in PdfReader(merged).pages], [111, 222])
 
 
+    def test_changed_requirements_trigger_install_prompt_before_processing(self):
+        self.assertEqual(self.invoke_ps('\n').returncode, 0)
+        (self.root / 'requirements.txt').write_text('pypdf>=999\n', encoding='utf-8')
+        blocked = self.invoke_ps('0\n')
+        self.assertEqual(blocked.returncode, 0, blocked.stdout + blocked.stderr)
+        self.assertIn('Требуется установка или обновление библиотек', blocked.stdout)
+        self.assertIn('Нажмите Enter для установки', blocked.stdout)
+        self.assertIn('Установка отменена', blocked.stdout)
+        self.assertFalse((self.root / 'output' / '2026-03-02.pdf').exists())
+
     def test_nonstandard_name_requires_explicit_ai_consent(self):
-        self.assertEqual(self.invoke_ps().returncode, 0)
+        self.assertEqual(self.invoke_ps('\n').returncode, 0)
         writer = PdfWriter()
         writer.add_blank_page(width=100, height=100)
         with (self.root / 'input' / 'scan.pdf').open('wb') as handle:

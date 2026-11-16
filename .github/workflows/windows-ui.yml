@@ -19,7 +19,7 @@ jobs:
       - name: Install test dependencies
         run: python -m pip install -r requirements.txt
       - name: Compile Python sources
-        run: python -m compileall -q pdf_merger.py ai_renamer.py tests
+        run: python -m compileall -q pdf_merger.py ai_renamer.py dependency_check.py tests
       - name: Unit tests (no external API calls)
         run: python -m unittest discover -s tests -v
 
@@ -33,6 +33,6 @@ jobs:
       - name: Install test dependencies
         run: python -m pip install -r requirements.txt
       - name: Compile Python sources
-        run: python -m compileall -q pdf_merger.py ai_renamer.py tests
+        run: python -m compileall -q pdf_merger.py ai_renamer.py dependency_check.py tests
       - name: Unit + PowerShell 5.1 interaction tests
         run: python -m unittest discover -s tests -v
