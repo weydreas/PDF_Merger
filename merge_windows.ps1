@@ -131,12 +131,50 @@ function Invoke-InteractiveMerger {
     Write-Host ''
     Write-Host 'Проверка имён PDF и объединение по дате...' -ForegroundColor Cyan
     $python = Ensure-LocalPython
-    & $python $MergeProgram | Out-Host
+    & $python $MergeProgram --check-names | Out-Host
+    $checkCode = $LASTEXITCODE
+    if ($checkCode -notin @(0, 3)) {
+        throw 'Не удалось проверить имена PDF. Объединение не запускалось.'
+    }
+
+    $useAI = $false
+    if ($checkCode -eq 3) {
+        Write-Host ''
+        Write-Host 'Найдены PDF без корректного префикса YYYY-MM-DD-.' -ForegroundColor Yellow
+        Write-Host 'AI может определить дату и переименовать эти файлы перед объединением.'
+        Write-Host 'ВНИМАНИЕ: для AI будут отправлены имя файла и текст первых двух страниц' -ForegroundColor Yellow
+        Write-Host '(не более 10000 символов) во внешний API. PDF целиком не передаётся.' -ForegroundColor Yellow
+        Write-Host 'Это может включать конфиденциальную медицинскую информацию.'
+        Write-Host '  [1] Разрешить AI-переименование (нужен API ключ в .env)' -ForegroundColor Cyan
+        Write-Host '  [2] Продолжить локально, пропустив файлы с неверными именами'
+        Write-Host '  [0] Отмена'
+        do {
+            $aiChoice = (Read-Host 'Выберите действие [1/2/0]').Trim()
+            if ($aiChoice -eq '0') {
+                Write-Host 'Отменено. Файлы не изменены.'
+                return 0
+            }
+            if ($aiChoice -eq '1') {
+                $useAI = $true
+                break
+            }
+            if ($aiChoice -eq '2') { break }
+            Write-Host 'Введите 1, 2 или 0.' -ForegroundColor Yellow
+        } while ($true)
+    }
+
+    $mergeArgs = @()
+    if ($useAI) { $mergeArgs += '--rename-with-ai' }
+    & $python $MergeProgram @mergeArgs | Out-Host
     $code = $LASTEXITCODE
     Write-Host ''
     if ($code -eq 0) {
         Write-Host 'Готово. Результаты находятся в папке output.' -ForegroundColor Green
-        Write-Host 'Исходные PDF в input не изменены.'
+        if ($useAI) {
+            Write-Host 'Содержимое PDF не изменено. Имена файлов с неверными датами могли быть исправлены.'
+        } else {
+            Write-Host 'Исходные PDF в input не изменены.'
+        }
     } else {
         Write-Host ("Обработка завершилась с ошибками (код {0}). Смотрите сообщения выше." -f $code) -ForegroundColor Red
     }
