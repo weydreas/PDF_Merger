@@ -20,7 +20,7 @@ from pypdf import PdfReader
 
 
 DEFAULT_API_URL = "https://api.openai.com/v1/chat/completions"
-DEFAULT_MODEL = "gpt-4o-mini"
+DEFAULT_MODEL = "gpt-6-luna"
 MAX_TEXT_CHARS = 10_000
 MAX_RESPONSE_BYTES = 128_000
 DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -57,12 +57,18 @@ def _env_values(path: Path) -> dict[str, str]:
         if "=" not in line:
             continue
         name, val = line.split("=", 1)
-        if name.strip() not in {"PDF_MERGER_API_KEY", "PDF_MERGER_API_URL", "PDF_MERGER_AI_MODEL"}:
+        name = name.strip()
+        if name not in {"PDF_MERGER_API_KEY", "PDF_MERGER_API_URL", "PDF_MERGER_AI_MODEL"}:
             continue
+        if name == "PDF_MERGER_AI_MODEL" and name in values:
+            raise RenameError(
+                f"В {path} несколько активных строк PDF_MERGER_AI_MODEL. "
+                "Оставьте одну строку, вторую закомментируйте символом #."
+            )
         val = val.strip()
         if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
             val = val[1:-1]
-        values[name.strip()] = val
+        values[name] = val
     return values
 
 
@@ -134,6 +140,10 @@ def request_suggestion(config: AIConfig, filename: str, excerpt: str) -> dict:
         ],
         "response_format": {"type": "json_object"},
     }
+    # For Luna's focused extraction task, avoid optional reasoning tokens.
+    # 4o mini and third-party Chat Completions endpoints keep the old payload.
+    if config.model == "gpt-6-luna":
+        body["reasoning_effort"] = "none"
     request = urllib.request.Request(
         config.api_url,
         data=json.dumps(body, ensure_ascii=False).encode("utf-8"),

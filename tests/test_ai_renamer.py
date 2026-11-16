@@ -1,6 +1,7 @@
 """AI preflight regression tests. Fake suggestions and synthetic PDFs only."""
 from contextlib import redirect_stderr, redirect_stdout
-from io import StringIO
+from io import BytesIO, StringIO
+import json
 from pathlib import Path
 import os
 import tempfile
@@ -85,7 +86,73 @@ class AIRenameTests(unittest.TestCase):
         template = Path(__file__).resolve().parent.parent / '.env.example'
         content = template.read_text(encoding='utf-8')
         self.assertIn('PDF_MERGER_API_KEY=insert your key here', content)
-        self.assertIn('PDF_MERGER_AI_MODEL=gpt-4o-mini', content)
+        self.assertIn('# PDF_MERGER_AI_MODEL=gpt-4o-mini', content)
+        self.assertEqual(
+            [line.strip() for line in content.splitlines()
+             if line.strip().startswith('PDF_MERGER_AI_MODEL=')],
+            ['PDF_MERGER_AI_MODEL=gpt-6-luna'],
+        )
+
+    def test_comment_switching_keeps_same_api_key(self):
+        for active, disabled in (
+            ('gpt-6-luna', 'gpt-4o-mini'),
+            ('gpt-4o-mini', 'gpt-6-luna'),
+        ):
+            with self.subTest(model=active):
+                self.env.write_text(
+                    'PDF_MERGER_API_KEY=test-secret\n'
+                    f'# PDF_MERGER_AI_MODEL={disabled}\n'
+                    f'PDF_MERGER_AI_MODEL={active}\n',
+                    encoding='utf-8',
+                )
+                config = load_config(self.env)
+                self.assertEqual(config.api_key, 'test-secret')
+                self.assertEqual(config.model, active)
+
+    def test_two_uncommented_model_lines_fail_closed(self):
+        self.env.write_text(
+            'PDF_MERGER_API_KEY=test-secret\n'
+            'PDF_MERGER_AI_MODEL=gpt-4o-mini\n'
+            'PDF_MERGER_AI_MODEL=gpt-6-luna\n',
+            encoding='utf-8',
+        )
+        with self.assertRaisesRegex(RenameError, 'несколько активных строк'):
+            load_config(self.env)
+
+    def test_no_model_line_defaults_to_luna(self):
+        self.env.write_text('PDF_MERGER_API_KEY=test-secret\n', encoding='utf-8')
+        self.assertEqual(load_config(self.env).model, 'gpt-6-luna')
+
+    def test_chat_completions_payload_supports_luna_and_4o_mini(self):
+        seen = []
+
+        class FakeOpener:
+            def open(self, request, timeout):
+                seen.append(json.loads(request.data))
+                response = {
+                    'choices': [{
+                        'message': {'content': json.dumps({
+                            'date': '2026-05-19',
+                            'title': 'Lab report',
+                            'evidence': '19.05.2026',
+                        })}
+                    }]
+                }
+                return BytesIO(json.dumps(response).encode('utf-8'))
+
+        with patch('ai_renamer.urllib.request.build_opener', return_value=FakeOpener()):
+            for model in ('gpt-6-luna', 'gpt-4o-mini'):
+                suggestion = request_suggestion(
+                    AIConfig('test-secret', 'https://api.openai.com/v1/chat/completions', model),
+                    'lab.pdf',
+                    'Report date: 19.05.2026',
+                )
+                self.assertEqual(suggestion['date'], '2026-05-19')
+
+        self.assertEqual([payload['model'] for payload in seen], ['gpt-6-luna', 'gpt-4o-mini'])
+        self.assertEqual(seen[0]['reasoning_effort'], 'none')
+        self.assertNotIn('reasoning_effort', seen[1])
+        self.assertEqual(seen[0]['response_format'], {'type': 'json_object'})
 
     def test_invalid_and_fabricated_dates_rejected(self):
         with self.assertRaises(RenameError):
