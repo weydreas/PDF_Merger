@@ -71,6 +71,22 @@ class AIRenameTests(unittest.TestCase):
         self.assertTrue((self.input / 'undated.pdf').exists())
         self.assertFalse(self.output.exists())
 
+    def test_example_placeholder_is_not_treated_as_an_api_key(self):
+        template = self.root / '.env.example'
+        template.write_text(
+            'PDF_MERGER_API_KEY=insert your key here\n'
+            'PDF_MERGER_AI_MODEL=gpt-4o-mini\n',
+            encoding='utf-8',
+        )
+        with self.assertRaisesRegex(RenameError, 'insert your key here'):
+            load_config(template)
+
+    def test_example_template_in_repo_contains_only_placeholder(self):
+        template = Path(__file__).resolve().parent.parent / '.env.example'
+        content = template.read_text(encoding='utf-8')
+        self.assertIn('PDF_MERGER_API_KEY=insert your key here', content)
+        self.assertIn('PDF_MERGER_AI_MODEL=gpt-4o-mini', content)
+
     def test_invalid_and_fabricated_dates_rejected(self):
         with self.assertRaises(RenameError):
             _verified_date('2025-02-29', '29.02.2025', '29.02.2025')
