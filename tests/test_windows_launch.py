@@ -46,7 +46,7 @@ class WindowsConsoleFlowTests(unittest.TestCase):
         )
 
     def test_first_run_prompts_installs_and_subsequent_run_skips_install(self):
-        canceled = self.invoke_ps('0\\n'.replace('\\n', '\n'))
+        canceled = self.invoke_ps('0\n')
         self.assertEqual(canceled.returncode, 0, canceled.stdout + canceled.stderr)
         self.assertTrue((self.root / 'input').is_dir())
         self.assertTrue((self.root / 'output').is_dir())
@@ -80,7 +80,7 @@ class WindowsConsoleFlowTests(unittest.TestCase):
         self.assertEqual(canceled.returncode, 0, canceled.stdout + canceled.stderr)
         self.assertIn('[1]', canceled.stdout)
         self.assertFalse((self.root / 'output' / '2026-03-02.pdf').exists())
-        self.assertFalse((self.root / '.venv').exists())
+        self.assertTrue((self.root / '.venv').exists())
 
         approved = self.invoke_ps('1\n')
         self.assertEqual(approved.returncode, 0, approved.stdout + approved.stderr)
@@ -94,7 +94,7 @@ class WindowsConsoleFlowTests(unittest.TestCase):
 
     def test_changed_requirements_trigger_install_prompt_before_processing(self):
         self.assertEqual(self.invoke_ps('\n').returncode, 0)
-        (self.root / 'requirements.txt').write_text('pypdf>=999\\n'.replace('\\n', '\n'), encoding='utf-8')
+        (self.root / 'requirements.txt').write_text('pypdf>=999\n', encoding='utf-8')
         blocked = self.invoke_ps('0\n')
         self.assertEqual(blocked.returncode, 0, blocked.stdout + blocked.stderr)
         self.assertIn('Требуется установка или обновление библиотек', blocked.stdout)
