@@ -1,0 +1,185 @@
+"""AI preflight regression tests. Fake suggestions and synthetic PDFs only."""
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
+from pathlib import Path
+import os
+import tempfile
+import unittest
+from unittest.mock import patch
+
+from pypdf import PdfReader, PdfWriter
+
+from ai_renamer import AIConfig, RenameError, _verified_date, apply_renames, load_config, plan_renames, request_suggestion
+from pdf_merger import main, process
+
+
+def make_pdf(path: Path, width: int = 100) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    writer = PdfWriter()
+    writer.add_blank_page(width=width, height=100)
+    with path.open('wb') as handle:
+        writer.write(handle)
+    writer.close()
+
+
+class AIRenameTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.input = self.root / 'input'
+        self.output = self.root / 'output'
+        self.input.mkdir()
+        self.env = self.root / '.env'
+        self.env.write_text('PDF_MERGER_API_KEY=test-secret\nPDF_MERGER_AI_MODEL=test-model\n', encoding='utf-8')
+        self.clean_env = patch.dict(os.environ, {'PDF_MERGER_API_KEY': '', 'PDF_MERGER_API_URL': '', 'PDF_MERGER_AI_MODEL': ''})
+        self.clean_env.start()
+        self.addCleanup(self.clean_env.stop)
+
+    def suggestion(self, day='2026-05-19', evidence='19.05.2026', title='Биохимия'):
+        return {'date': day, 'evidence': evidence, 'title': title}
+
+    def test_renames_and_merges_with_ai(self):
+        src = self.input / 'scan.pdf'
+        make_pdf(src, 173)
+        original = src.read_bytes()
+        with patch('ai_renamer.extract_excerpt', return_value='Document dated 19.05.2026'), \
+             patch('ai_renamer.request_suggestion', return_value=self.suggestion()) as api, \
+             redirect_stdout(StringIO()):
+            result = process(self.input, self.output, rename_with_ai=True, env_file=self.env)
+        self.assertEqual(result.files_renamed, 1)
+        self.assertEqual(result.groups_written, 1)
+        new = self.input / '2026-05-19-Биохимия.pdf'
+        self.assertFalse(src.exists())
+        self.assertEqual(new.read_bytes(), original)
+        self.assertEqual(self.output.joinpath('2026-05-19.pdf').read_bytes(), original)
+        api.assert_called_once()
+
+    def test_clean_names_never_need_key_or_api(self):
+        make_pdf(self.input / '2024-02-29-valid.pdf')
+        with patch('ai_renamer.request_suggestion') as api, redirect_stdout(StringIO()):
+            result = process(self.input, self.output, rename_with_ai=True, env_file=self.root / 'absent')
+        self.assertEqual(result.groups_written, 1)
+        self.assertEqual(result.files_renamed, 0)
+        api.assert_not_called()
+
+    def test_missing_key_stops_before_merge_and_rename(self):
+        make_pdf(self.input / 'undated.pdf')
+        with redirect_stderr(StringIO()), redirect_stdout(StringIO()):
+            code = main(['--input-dir', str(self.input), '--output-dir', str(self.output), '--env-file', str(self.root / 'missing'), '--rename-with-ai'])
+        self.assertEqual(code, 2)
+        self.assertTrue((self.input / 'undated.pdf').exists())
+        self.assertFalse(self.output.exists())
+
+    def test_invalid_and_fabricated_dates_rejected(self):
+        with self.assertRaises(RenameError):
+            _verified_date('2025-02-29', '29.02.2025', '29.02.2025')
+        with self.assertRaises(RenameError):
+            _verified_date('2026-05-19', '19.05.2026', 'not in document')
+        with self.assertRaises(RenameError):
+            _verified_date('2026-05-19', '19.05.2026', '02.04.2026')
+        self.assertEqual(_verified_date('2026-05-19', '19.05.2026', 'Date: 19.05.2026'), '2026-05-19')
+        self.assertEqual(_verified_date('2026-05-19', '2026/5/19', '2026/5/19'), '2026-05-19')
+
+    def test_two_phase_preflight_does_not_rename_on_second_error(self):
+        src1 = self.input / 'scan1.pdf'
+        src2 = self.input / 'scan2.pdf'
+        make_pdf(src1)
+        make_pdf(src2)
+        with patch('ai_renamer.extract_excerpt', return_value='19.05.2026'), \
+             patch('ai_renamer.request_suggestion', side_effect=[self.suggestion(), self.suggestion(day='', evidence='')]):
+            with self.assertRaises(RenameError):
+                plan_renames([src1, src2], self.input, self.env)
+        self.assertTrue(src1.exists())
+        self.assertTrue(src2.exists())
+
+    def test_collision_creates_unique_suffix_never_overwrites(self):
+        existing = self.input / '2026-05-19-Биохимия.pdf'
+        src1 = self.input / 'a.pdf'
+        src2 = self.input / 'b.pdf'
+        for f in (existing, src1, src2):
+            make_pdf(f)
+        with patch('ai_renamer.extract_excerpt', return_value='19.05.2026'), \
+             patch('ai_renamer.request_suggestion', return_value=self.suggestion()):
+            planned = plan_renames([src1, src2], self.input, self.env)
+        self.assertEqual([p.name for p in planned.values()], ['2026-05-19-Биохимия-02.pdf', '2026-05-19-Биохимия-03.pdf'])
+        apply_renames(planned)
+        self.assertTrue(existing.exists())
+        self.assertTrue(all(p.exists() for p in planned.values()))
+
+    def test_dry_run_previews_ai_groups_but_changes_nothing(self):
+        src = self.input / 'scan.pdf'
+        make_pdf(src)
+        out = StringIO()
+        with patch('ai_renamer.extract_excerpt', return_value='19.05.2026'), \
+             patch('ai_renamer.request_suggestion', return_value=self.suggestion()), redirect_stdout(out):
+            report = process(self.input, self.output, rename_with_ai=True, env_file=self.env, dry_run=True)
+        self.assertEqual(report.groups_planned, 1)
+        self.assertEqual(report.files_renamed, 0)
+        self.assertTrue(src.exists())
+        self.assertFalse(self.output.exists())
+        self.assertIn('ПЛАН AI:', out.getvalue())
+
+    def test_check_names_is_local_and_uses_full_calendar_validation(self):
+        make_pdf(self.input / '2025-02-29-invalid.pdf')
+        make_pdf(self.input / '2024-02-29-valid.pdf')
+        output = StringIO()
+        with patch('ai_renamer.request_suggestion') as api, redirect_stdout(output):
+            code = main(['--input-dir', str(self.input), '--output-dir', str(self.output), '--check-names'])
+        self.assertEqual(code, 3)
+        self.assertIn(': 1', output.getvalue())
+        self.assertFalse(self.output.exists())
+        api.assert_not_called()
+
+    def test_opt_out_keeps_old_offline_behavior(self):
+        make_pdf(self.input / 'undated.pdf')
+        with patch('ai_renamer.request_suggestion') as api, redirect_stdout(StringIO()):
+            report = process(self.input, self.output)
+        self.assertEqual(report.files_ignored, 1)
+        api.assert_not_called()
+
+    def test_recursive_ai_includes_subdir_but_excludes_output(self):
+        make_pdf(self.input / 'sub' / 'scan.pdf')
+        make_pdf(self.input / 'output' / 'undated.pdf')
+        with patch('ai_renamer.extract_excerpt', return_value='19.05.2026'), \
+             patch('ai_renamer.request_suggestion', return_value=self.suggestion()), redirect_stdout(StringIO()):
+            report = process(self.input, self.input / 'output', rename_with_ai=True, env_file=self.env, recursive=True)
+        self.assertEqual(report.files_renamed, 1)
+        self.assertTrue((self.input / 'output' / 'undated.pdf').exists())
+
+    def test_url_rejects_http_and_injected_credentials(self):
+        self.env.write_text('PDF_MERGER_API_KEY=test-secret\nPDF_MERGER_API_URL=http://localhost/chat\n')
+        with self.assertRaises(RenameError):
+            load_config(self.env)
+        self.env.write_text('PDF_MERGER_API_KEY=test-secret\nPDF_MERGER_API_URL=https://u:p@example.com/chat\n')
+        with self.assertRaises(RenameError):
+            load_config(self.env)
+
+    def test_no_follow_redirect_for_api_key(self):
+        class Redirect:
+            def __init__(self):
+                self.opener = None
+            def open(self, request, timeout):
+                self.assert_no_redirect = bool(self.opener)
+                raise __import__('urllib.error', fromlist=['HTTPError']).HTTPError(request.full_url, 302, 'Redirect', {}, None)
+        fake = Redirect()
+        with patch('ai_renamer.urllib.request.build_opener', side_effect=lambda *handlers: fake):
+            with self.assertRaises(RenameError) as error:
+                request_suggestion(AIConfig('secret', 'https://api.example/chat', 'test'), 'file.pdf', '')
+        self.assertIn('302', str(error.exception))
+
+    def test_non_pdf_and_symlink_ignored(self):
+        make_pdf(self.input / 'real.pdf')
+        (self.input / 'notes.txt').write_text('ignore')
+        try:
+            (self.input / 'linked.pdf').symlink_to(self.input / 'real.pdf')
+        except (OSError, NotImplementedError):
+            pass
+        with patch('ai_renamer.extract_excerpt', return_value='19.05.2026'), \
+             patch('ai_renamer.request_suggestion', return_value=self.suggestion()), redirect_stdout(StringIO()):
+            report = process(self.input, self.output, rename_with_ai=True, env_file=self.env)
+        self.assertEqual(report.files_renamed, 1)
+
+
+if __name__ == '__main__':
+    unittest.main()
