@@ -88,7 +88,9 @@ function Ensure-LocalPython {
     Write-Host 'Для загрузки библиотек потребуется интернет. PDF-файлы никуда не отправляются.'
     Write-Host 'Нажмите Enter для установки. Для отмены введите 0.'
     do {
-        $installChoice = Read-Host 'Enter - установить, 0 - отменить'
+        # ReadLine distinguishes an explicit empty Enter from end-of-input on Windows PowerShell 5.1.
+        Write-Host 'Enter - установить, 0 - отменить: ' -NoNewline
+        $installChoice = [Console]::ReadLine()
         if ($null -eq $installChoice -or $installChoice -eq '0') {
             Write-Host 'Установка отменена. Файлы не изменены.'
             return $null
