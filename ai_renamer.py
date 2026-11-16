@@ -20,7 +20,7 @@ from pypdf import PdfReader
 
 
 DEFAULT_API_URL = "https://api.openai.com/v1/chat/completions"
-DEFAULT_MODEL = "gpt-4o-mini"
+DEFAULT_MODEL = "gpt-6-luna"
 MAX_TEXT_CHARS = 10_000
 MAX_RESPONSE_BYTES = 128_000
 DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -134,6 +134,10 @@ def request_suggestion(config: AIConfig, filename: str, excerpt: str) -> dict:
         ],
         "response_format": {"type": "json_object"},
     }
+    # For Luna's focused extraction task, avoid optional reasoning tokens.
+    # 4o mini and third-party Chat Completions endpoints keep the old payload.
+    if config.model == "gpt-6-luna":
+        body["reasoning_effort"] = "none"
     request = urllib.request.Request(
         config.api_url,
         data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
