@@ -37,7 +37,7 @@ class SuryaCPUPilotTests(unittest.TestCase):
             "$env:llama_cpp_ngl = '0'",
             "$env:torch_device = 'cpu'",
             "$env:surya_inference_parallel = '1'",
-            "test-surya-cpu", "synthetic-medical-page.png",
+            "surya-cpu-pilot", "synthetic-medical-page.png",
             "llama-server.exe", "get-filehash", "sha256", "425eeb2a94a9600",
         ):
             self.assertIn(required, self.script)
