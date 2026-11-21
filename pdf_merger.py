@@ -16,7 +16,7 @@ import tempfile
 
 from pypdf import PdfReader, PdfWriter
 
-from document_router import classify_document
+from document_router import DocumentClass, classify_document
 
 
 ROOT = Path(__file__).resolve().parent
@@ -72,6 +72,7 @@ def discover_groups(
 def plan_outputs(
     groups: dict[str, list[Path]], input_dir: Path, output_dir: Path,
     name_overrides: dict[Path, str] | None = None,
+    classifications: dict[Path, DocumentClass] | None = None,
 ) -> list[tuple[Path, list[Path], str]]:
     """Lab results merge only with lab results for the same day.
 
@@ -82,9 +83,13 @@ def plan_outputs(
     individual: list[tuple[str, Path, str, str]] = []
     for day, paths in groups.items():
         for path in paths:
-            classification = classify_document(
-                path, effective_name=(name_overrides or {}).get(path, path.name)
+            classification = (
+                classifications.get(path) if classifications is not None else None
             )
+            if classification is None:
+                classification = classify_document(
+                    path, effective_name=(name_overrides or {}).get(path, path.name)
+                )
             if classification.category == "lab":
                 labs[day].append(path)
             elif classification.category == "study":
@@ -195,6 +200,7 @@ def process(
     input_dir: Path, output_dir: Path, *, overwrite: bool = False,
     dry_run: bool = False, recursive: bool = False,
     rename_with_ai: bool = False, env_file: Path | None = None,
+    ai_classification: str | None = None,
 ) -> Result:
     input_dir = input_dir.resolve()
     output_dir = output_dir.resolve()
@@ -202,6 +208,8 @@ def process(
         raise ValueError(f"Input directory does not exist: {input_dir}")
     if input_dir == output_dir:
         raise ValueError("Input and output directories must differ")
+    if ai_classification not in (None, "review", "all"):
+        raise ValueError("Invalid AI classification mode")
 
     name_overrides: dict[Path, str] = {}
     renamed = 0
@@ -259,7 +267,37 @@ def process(
                 )
 
     groups, ignored = discover_groups(input_dir, output_dir, recursive=recursive, name_overrides=name_overrides)
-    plans = plan_outputs(groups, input_dir, output_dir, name_overrides=name_overrides)
+    classifications: dict[Path, DocumentClass] = {}
+    if ai_classification and not (unresolved and not dry_run):
+        from ai_renamer import AIProgressLog
+        from semantic_classifier import classify_documents_with_ai
+
+        all_paths = [path for paths in groups.values() for path in paths]
+        if ai_classification == "review":
+            ai_paths = [
+                path for path in all_paths
+                if classify_document(
+                    path, effective_name=name_overrides.get(path, path.name)
+                ).category == "review"
+            ]
+        else:
+            ai_paths = all_paths
+        print(
+            f"СЕМАНТИЧЕСКАЯ AI-КЛАССИФИКАЦИЯ: {len(ai_paths)} из "
+            f"{len(all_paths)} PDF; режим {ai_classification}. "
+            "Текст документа передаётся во внешний API только по вашему выбору."
+        )
+        if ai_paths:
+            progress = AIProgressLog(ROOT / "logs" / "ai-progress.log")
+            classifications = classify_documents_with_ai(
+                ai_paths, env_file or ROOT / ".env",
+                ROOT / "logs" / "ai-classification-cache.json",
+                progress=progress,
+            )
+    plans = plan_outputs(
+        groups, input_dir, output_dir, name_overrides=name_overrides,
+        classifications=classifications,
+    )
     result = Result(
         files_ignored=len(ignored), groups_planned=len(plans),
         files_renamed=renamed, ai_unresolved=len(unresolved),
@@ -386,6 +424,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--overwrite", action="store_true", help="Replace existing merged files")
     parser.add_argument("--dry-run", action="store_true", help="Preview groups without writing; AI mode may still send text to API")
     parser.add_argument("--rename-with-ai", action="store_true", help="Opt in to sending excerpts of wrongly named PDFs to external AI; rename them before merging")
+    parser.add_argument(
+        "--classify-with-ai", choices=("review", "all"),
+        help="Explicitly authorize external AI to classify review-only or all dated PDFs. May send medical text and incur API charges; uses local hash cache.",
+    )
     parser.add_argument("--env-file", type=Path, default=ROOT / ".env", help="AI settings file (default: ./.env)")
     parser.add_argument("--check-names", action="store_true", help="Validate PDF names locally; returns 3 if AI preflight is needed")
     args = parser.parse_args(argv)
@@ -403,6 +445,7 @@ def main(argv: list[str] | None = None) -> int:
             args.input_dir, args.output_dir, overwrite=args.overwrite,
             dry_run=args.dry_run, recursive=args.recursive,
             rename_with_ai=args.rename_with_ai, env_file=args.env_file,
+            ai_classification=args.classify_with_ai,
         )
     except (OSError, ValueError) as exc:
         print(f"ОШИБКА: {exc}", file=sys.stderr)
