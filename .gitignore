@@ -16,3 +16,7 @@ __pycache__/
 
 # Local AI diagnostic progress (no secrets or PDF excerpts).
 /logs/
+
+# Isolated CPU-only Surya OCR pilot (models, binaries, OCR test output are local).
+/.venv-surya-cpu/
+/.local-tools/
