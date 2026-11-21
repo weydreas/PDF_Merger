@@ -269,8 +269,9 @@ def plan_renames(
                 progress(f"{prefix}: текст извлечён ({len(excerpt)} символов).")
             stage = "ожидание API"
             if progress:
+                safe_model = cfg.model if re.fullmatch(r"[A-Za-z0-9._-]{1,64}", cfg.model) else "(нестандартное значение)"
                 progress(
-                    f"{prefix}: запрос к AI (модель: {cfg.model}, "
+                    f"{prefix}: запрос к AI (модель: {safe_model}, "
                     f"сетевой тайм-аут: {API_TIMEOUT_SECONDS} с)."
                 )
             request_started = time.monotonic()
