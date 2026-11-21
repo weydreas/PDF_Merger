@@ -75,6 +75,24 @@ class RenameError(ValueError):
     """Preflight failure; no merge should be started."""
 
 
+class DateVerificationError(RenameError):
+    """Unverified model date for a single document: never rename that file."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+
+
+@dataclass(frozen=True)
+class UnresolvedDocument:
+    """Failure details for local console, not for the privacy-preserving log."""
+
+    path: Path
+    number: int
+    code: str
+    reason: str
+
+
 @dataclass(frozen=True)
 class AIConfig:
     api_key: str
@@ -219,13 +237,13 @@ def request_suggestion(config: AIConfig, filename: str, excerpt: str) -> dict:
 
 def _verified_date(value: object, evidence: object, source: str) -> str:
     if not isinstance(value, str) or not DATE_PATTERN.fullmatch(value):
-        raise RenameError("AI не определил достоверную дату документа; исходный файл оставлен без изменений")
+        raise DateVerificationError("missing-date", "AI не определил достоверную дату документа; исходный файл оставлен без изменений")
     try:
         parsed = date.fromisoformat(value)
     except ValueError as exc:
-        raise RenameError("AI вернул несуществующую дату; исходный файл оставлен без изменений") from exc
+        raise DateVerificationError("invalid-date", "AI вернул несуществующую дату; исходный файл оставлен без изменений") from exc
     if not isinstance(evidence, str) or not evidence or evidence not in source:
-        raise RenameError("Дата AI не подтверждена буквальным фрагментом документа или имени файла")
+        raise DateVerificationError("evidence-missing", "Дата AI не подтверждена буквальным фрагментом документа или имени файла")
     for m in DATE_IN_EVIDENCE.finditer(evidence):
         try:
             if m.group(1):
@@ -236,7 +254,7 @@ def _verified_date(value: object, evidence: object, source: str) -> str:
             continue
         if candidate == parsed:
             return value
-    raise RenameError("Дата AI не соответствует текстовому доказательству из документа")
+    raise DateVerificationError("evidence-mismatch", "Дата AI не соответствует текстовому доказательству из документа")
 
 
 def _safe_title(value: object) -> str:
@@ -252,8 +270,14 @@ def _safe_title(value: object) -> str:
 def plan_renames(
     paths: list[Path], input_dir: Path, env_file: Path,
     progress: Callable[[str], None] | None = None,
+    *, unresolved: list[UnresolvedDocument] | None = None,
 ) -> dict[Path, Path]:
-    """Validate all suggestions before changing any source path."""
+    """Plan safe renames; optionally skip unverified dates for batch processing.
+
+    By default a rejected date remains fatal for all-or-nothing callers.
+    With unresolved supplied, only date-validation failures are recoverable;
+    transport/API failures still abort before any file is renamed.
+    """
     if not paths:
         return {}
     cfg = load_config(env_file)
@@ -297,6 +321,19 @@ def plan_renames(
             # when it is supported by local evidence in the document text.
             # Unknown type is explicitly marked for separate manual review.
             title = _safe_title(local.title)
+        except DateVerificationError as exc:
+            if unresolved is not None:
+                unresolved.append(UnresolvedDocument(path, index, exc.code, str(exc)))
+                if progress:
+                    # No filenames, dates, PDF content, or raw model output in logs.
+                    progress(
+                        f"{prefix}: ПРОПУЩЕН — дата не подтверждена ({exc.code}); "
+                        "исходный файл сохранён, обработка остальных продолжается."
+                    )
+                continue
+            if progress:
+                progress(f"{prefix}: ОШИБКА проверки даты ({exc.code}). Планирование остановлено.")
+            raise
         except (OSError, ValueError) as exc:
             if progress:
                 # No filename, exception text, document excerpt, or secret in the log.

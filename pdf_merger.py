@@ -30,6 +30,7 @@ class Result:
     files_ignored: int = 0
     groups_planned: int = 0
     files_renamed: int = 0
+    ai_unresolved: int = 0
 
 
 def discover_groups(
@@ -159,6 +160,7 @@ def process(
 
     name_overrides: dict[Path, str] = {}
     renamed = 0
+    unresolved = []
     if rename_with_ai:
         from ai_renamer import AIProgressLog, apply_renames, plan_renames
 
@@ -174,12 +176,24 @@ def process(
             try:
                 planned = plan_renames(
                     needs_renaming, input_dir, env_file or ROOT / ".env",
-                    progress=progress,
+                    progress=progress, unresolved=unresolved,
                 )
             except (OSError, ValueError):
                 progress("Проверка остановлена: планирование не завершено, исходные имена сохранены.")
                 raise
-            progress(f"Все {len(planned)} предложений получены и проверены.")
+            progress(
+                f"AI-проверка завершена: {len(planned)} подтверждено, "
+                f"{len(unresolved)} с недостоверной датой."
+            )
+            for issue in unresolved:
+                # File names stay local in the console; the persistent progress
+                # log retains only numeric indices and non-sensitive reason codes.
+                print(
+                    f"ТРЕБУЕТ ПРОВЕРКИ (документ {issue.number}/{len(needs_renaming)}): "
+                    f"{issue.path.relative_to(input_dir)} — {issue.reason}. "
+                    "Файл останется без изменений.",
+                    flush=True,
+                )
             for original, proposed in planned.items():
                 action = "ПЛАН AI" if dry_run else "AI-ПЕРЕИМЕНОВАНИЕ"
                 print(f"{action}: {original.relative_to(input_dir)} -> {proposed.relative_to(input_dir)}")
@@ -194,13 +208,30 @@ def process(
                     progress("ОШИБКА файловой операции. Проверьте input: часть имён могла измениться.")
                     raise
                 renamed = len(planned)
-                progress(f"Переименование завершено: {renamed} файлов. Переход к объединению.")
+                progress(
+                    f"Переименование завершено: {renamed} файлов. "
+                    + ("Итоговые PDF отложены из-за неподтверждённых дат." if unresolved else "Переход к объединению.")
+                )
 
     groups, ignored = discover_groups(input_dir, output_dir, recursive=recursive, name_overrides=name_overrides)
     plans = plan_outputs(groups, input_dir, output_dir, name_overrides=name_overrides)
-    result = Result(files_ignored=len(ignored), groups_planned=len(plans), files_renamed=renamed)
+    result = Result(
+        files_ignored=len(ignored), groups_planned=len(plans),
+        files_renamed=renamed, ai_unresolved=len(unresolved),
+    )
     for path in ignored:
         print(f"ПРОПУЩЕН (нет корректной даты YYYY-MM-DD-): {path.relative_to(input_dir)}")
+    if unresolved and not dry_run:
+        print(
+            "\nНЕПОЛНАЯ AI-ПРОВЕРКА: документы с подтверждённой датой переименованы, "
+            "но создание итоговых PDF отложено до проверки оставшихся файлов."
+        )
+        print(
+            "При следующем запуске AI потребуется только для файлов без "
+            "правильного YYYY-MM-DD- имени. Исходные PDF и прежний output сохранены."
+        )
+        return result
+
     if not plans:
         print("Не найдено документов с корректной датой для обработки.")
         return result
@@ -240,7 +271,8 @@ def process(
     print(
         f"\nИтог: {result.groups_written} создано; {result.groups_skipped} пропущено; "
         f"{result.groups_failed} ошибок; {result.files_ignored} PDF с некорректной датой; "
-        f"{result.files_renamed} переименовано AI."
+        f"{result.files_renamed} переименовано AI; "
+        f"{result.ai_unresolved} требуют проверки даты."
     )
     return result
 
@@ -276,7 +308,7 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, ValueError) as exc:
         print(f"ОШИБКА: {exc}", file=sys.stderr)
         return 2
-    return 1 if report.groups_failed else 0
+    return 1 if (report.groups_failed or report.ai_unresolved) else 0
 
 
 if __name__ == "__main__":
