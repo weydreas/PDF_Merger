@@ -267,9 +267,14 @@ def plan_renames(
             excerpt = extract_excerpt(path)
             if progress:
                 progress(f"{prefix}: текст извлечён ({len(excerpt)} символов).")
+            if not excerpt.strip() and not DATE_IN_EVIDENCE.search(path.name):
+                raise RenameError(
+                    "PDF не содержит извлекаемого текста, а имя — подтверждённой даты. "
+                    "Вероятно, это скан без текстового слоя; нужен OCR. AI API не вызывался."
+                )
             stage = "ожидание API"
             if progress:
-                safe_model = cfg.model if re.fullmatch(r"[A-Za-z0-9._-]{1,64}", cfg.model) else "(нестандартное значение)"
+                safe_model = cfg.model if cfg.model in ("gpt-6-luna", "gpt-4o-mini") else "(модель из конфигурации)"
                 progress(
                     f"{prefix}: запрос к AI (модель: {safe_model}, "
                     f"сетевой тайм-аут: {API_TIMEOUT_SECONDS} с)."
