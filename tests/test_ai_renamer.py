@@ -164,6 +164,92 @@ class AIRenameTests(unittest.TestCase):
         self.assertEqual(_verified_date('2026-05-19', '19.05.2026', 'Date: 19.05.2026'), '2026-05-19')
         self.assertEqual(_verified_date('2026-05-19', '2026/5/19', '2026/5/19'), '2026-05-19')
 
+    def test_partial_date_rejection_keeps_bad_file_and_defers_outputs(self):
+        source = [self.input / name for name in ('a.pdf', 'b.pdf', 'c.pdf')]
+        for path in source:
+            make_pdf(path)
+        originals = [path.read_bytes() for path in source]
+        output = StringIO()
+        with patch('ai_renamer.extract_excerpt', return_value='Дата 19.05.2026'), \
+             patch('ai_renamer.request_suggestion', side_effect=[
+                 self.suggestion(), self.suggestion(day='', evidence=''), self.suggestion(),
+             ]) as api, redirect_stdout(output):
+            report = process(self.input, self.output, rename_with_ai=True, env_file=self.env)
+        self.assertEqual((report.files_renamed, report.ai_unresolved, report.groups_written), (2, 1, 0))
+        self.assertEqual(api.call_count, 3)
+        self.assertFalse(source[0].exists())
+        self.assertTrue(source[1].exists())
+        self.assertFalse(source[2].exists())
+        self.assertEqual(source[1].read_bytes(), originals[1])
+        self.assertFalse(self.output.exists())
+        self.assertIn('документ 2/3', output.getvalue())
+        self.assertIn('b.pdf', output.getvalue())
+        self.assertIn('создание итоговых PDF отложено', output.getvalue())
+        self.assertTrue((self.input / '2026-05-19-Требует-проверки.pdf').exists())
+        self.assertTrue((self.input / '2026-05-19-Требует-проверки-02.pdf').exists())
+
+        # Only the one unresolved PDF needs another paid API request.
+        with patch('ai_renamer.extract_excerpt', return_value='Дата 19.05.2026'), \
+             patch('ai_renamer.request_suggestion', return_value=self.suggestion()) as api, \
+             redirect_stdout(StringIO()):
+            second = process(self.input, self.output, rename_with_ai=True, env_file=self.env)
+        api.assert_called_once()
+        self.assertEqual((second.files_renamed, second.ai_unresolved, second.groups_written), (1, 0, 3))
+        self.assertEqual(len(list((self.output / 'На_проверку').glob('*.pdf'))), 3)
+        self.assertEqual(
+            sorted(path.read_bytes() for path in (self.output / 'На_проверку').glob('*.pdf')),
+            sorted(originals),
+        )
+
+    def test_unverified_dates_report_safe_code_but_no_filename_in_persistent_log(self):
+        source = self.input / 'private-patient.pdf'
+        make_pdf(source)
+        events = []
+        unresolved = []
+        with patch('ai_renamer.extract_excerpt', return_value='Date 19.05.2026'), \
+             patch('ai_renamer.request_suggestion', return_value=self.suggestion(
+                 day='2026-05-20', evidence='19.05.2026',
+             )):
+            planned = plan_renames([source], self.input, self.env, progress=events.append, unresolved=unresolved)
+        self.assertEqual(planned, {})
+        self.assertEqual(len(unresolved), 1)
+        self.assertEqual(unresolved[0].code, 'evidence-mismatch')
+        self.assertIn('дата не соответствует', unresolved[0].reason.lower())
+        self.assertIn('evidence-mismatch', events[-1])
+        self.assertNotIn('private-patient', '\n'.join(events))
+        self.assertNotIn('test-secret', '\n'.join(events))
+        self.assertNotIn('19.05.2026', '\n'.join(events))
+        self.assertTrue(source.exists())
+
+    def test_api_failure_still_aborts_batch_without_partial_rename(self):
+        first, second = self.input / 'a.pdf', self.input / 'b.pdf'
+        make_pdf(first)
+        make_pdf(second)
+        with patch('ai_renamer.extract_excerpt', return_value='Date 19.05.2026'), \
+             patch('ai_renamer.request_suggestion', side_effect=[
+                 self.suggestion(), RenameError('AI API ответил HTTP 429: quota'),
+             ]) as api:
+            with self.assertRaisesRegex(RenameError, 'HTTP 429'):
+                plan_renames([first, second], self.input, self.env, unresolved=[])
+        self.assertEqual(api.call_count, 2)
+        self.assertTrue(first.exists())
+        self.assertTrue(second.exists())
+        self.assertEqual(list(self.input.glob('2026-*.pdf')), [])
+
+    def test_cli_partial_date_error_exits_nonzero_without_publishing(self):
+        source = self.input / 'no-date.pdf'
+        make_pdf(source)
+        with patch('ai_renamer.extract_excerpt', return_value='19.05.2026'), \
+             patch('ai_renamer.request_suggestion', return_value=self.suggestion(day='', evidence='')), \
+             redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            code = main([
+                '--input-dir', str(self.input), '--output-dir', str(self.output),
+                '--env-file', str(self.env), '--rename-with-ai',
+            ])
+        self.assertEqual(code, 1)
+        self.assertTrue(source.exists())
+        self.assertFalse(self.output.exists())
+
     def test_two_phase_preflight_does_not_rename_on_second_error(self):
         src1 = self.input / 'scan1.pdf'
         src2 = self.input / 'scan2.pdf'
