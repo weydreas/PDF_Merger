@@ -23,6 +23,12 @@ class LauncherContractTests(unittest.TestCase):
         self.assertIn('pause >nul', source)
         self.assertIn('powershell.exe', source)
 
+    def test_python_output_is_unbuffered_for_ai_progress(self):
+        source = (ROOT / 'merge_windows.ps1').read_text(encoding='utf-8-sig')
+        self.assertIn("PYTHONUNBUFFERED = '1'", source)
+        self.assertIn('& $python -u $MergeProgram @mergeArgs', source)
+        self.assertIn("logs\\ai-progress.log", source)
+
     def test_old_launcher_routes_to_new_entrypoint(self):
         source = (ROOT / 'merge_windows.bat').read_text(encoding='utf-8').lower()
         self.assertIn('start.cmd', source)
@@ -166,6 +172,8 @@ class WindowsConsoleFlowTests(unittest.TestCase):
         ai = self.invoke_ps('1\n1\n')
         self.assertNotEqual(ai.returncode, 0)
         self.assertIn('PDF_MERGER_API_KEY', ai.stdout + ai.stderr)
+        self.assertIn('AI: запускается проверка документов', ai.stdout)
+        self.assertIn('Начало: 1 PDF', ai.stdout)
         self.assertTrue((self.root / 'input' / 'scan.pdf').exists())
 
 
