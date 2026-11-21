@@ -25,7 +25,7 @@ class DocumentClass:
 # Test the presence of explicit modality terms in the actual extracted text.
 STUDY_TERMS: tuple[tuple[str, str], ...] = (
     ("Рентгенография", r"рентгенограф\w*|рентгеновск\w*\s+сним\w*|\bx[- ]?ray\b"),
-    ("Компьютерная томография", r"компьютерн\w*\s+томограф\w*|\bкт\s+(?:органов|головы|мозга|грудной|брюшной|позвоночника)\b|\bct\s+scan\b"),
+    ("КТ", r"компьютерн\w*\s+томограф\w*|\bкт\s+(?:органов|головы|мозга|грудной|брюшной|позвоночника)\b|\bct\s+scan\b"),
     ("МРТ", r"магнитно[ -]?резонансн\w*\s+томограф\w*|\bмрт\b|\bmri\b"),
     ("УЗИ", r"ультразвуков\w*\s+исследован\w*|ультрасонограф\w*|\bузи\b|\bultrasound\b"),
     ("ЭКГ", r"электрокардиограф\w*|\bэкг\b|\becg\b|\bekg\b"),
@@ -59,53 +59,88 @@ REGIONS: tuple[tuple[str, str], ...] = (
 REGION_REGEXES = tuple((label, re.compile(pattern, re.IGNORECASE)) for label, pattern in REGIONS)
 
 
+# Hospital LIS exports use the generic field "Дата назначения лабораторного
+# исследования" even for ECG and X-ray. The performed procedure is the
+# CODE - PROCEDURE. Врач: ... row; use THAT rather than incidental text.
+PROCEDURE_ROW = re.compile(
+    r"(?m)^[ \t]*((?:[A-Za-zА-Яа-я]\d{2,}|\d{3,})(?:\.\d+){0,4})[ \t]*-[ \t]*"
+    r"(.+?)(?:[ \t]+Врач\s*:|$)",
+    re.IGNORECASE,
+)
+# Specific, known lab test code families; not every A-prefixed code is a lab.
+LAB_CODE = re.compile(r"^(?:A09(?:\.|$)|A12\.(?:05|30)(?:\.|$)|A26(?:\.|$)|B03(?:\.|$))", re.I)
+
+
+def _study_title(kind: str, procedure: str) -> str:
+    if kind not in {"Рентгенография", "КТ", "МРТ", "УЗИ"}:
+        return kind
+    regions = [title for title, rx in REGION_REGEXES if rx.search(procedure)]
+    return f"{kind} {regions[0]}" if len(regions) == 1 else kind
+
+
+def _lab_title(labels: list[str]) -> str:
+    specific = [lab for lab, pattern in LAB_REGEXES
+                if lab != "Лабораторные анализы"
+                and any(pattern.search(label) for label in labels)]
+    return specific[0] if len(set(specific)) == 1 else "Анализы"
+
+
+
 def classify_text(filename: str, excerpt: str) -> DocumentClass:
-    """Use explicit document text first; filename alone is a secondary hint.
+    """Classify by the performed procedure, not export headers or referrals.
 
-    Broad words "test", "анализ", "исследование" do not prove the category.
-    If multiple modalities are present, do not guess which one is the report.
+    The filename (including any previous AI title) is never proof of a lab.
+    No text or conflicting procedure rows => individual manual review.
     """
-    name = re.sub(r"^\d{4}-\d{2}-\d{2}-", "", Path(filename).stem).replace("_", " ")
-    header = excerpt[:2500]
-    study_hits = [(label, pattern.search(header)) for label, pattern in STUDY_REGEXES]
-    text_studies = [(label, match) for label, match in study_hits if match]
-    name_studies = [label for label, pattern in STUDY_REGEXES if pattern.search(name)]
-    text_lab = [label for label, pattern in LAB_REGEXES if pattern.search(header)]
-    name_lab = [label for label, pattern in LAB_REGEXES if pattern.search(name)]
+    header = excerpt[:6000]
+    rows = [(match.group(1), match.group(2).strip(" \t."))
+            for match in PROCEDURE_ROW.finditer(header)]
+    if rows:
+        studies: list[tuple[str, str]] = []
+        labs: list[str] = []
+        unknown: list[str] = []
+        for code, procedure in rows:
+            kinds = [kind for kind, pattern in STUDY_REGEXES
+                     if pattern.search(procedure)]
+            if len(kinds) == 1:
+                studies.append((kinds[0], procedure))
+            elif len(kinds) > 1:
+                return DocumentClass("review", "Требует-проверки",
+                                     "в одном названии процедуры несколько модальностей")
+            elif LAB_CODE.match(code):
+                labs.append(procedure)
+            else:
+                unknown.append(procedure)
 
-    # Text carries more weight than an AI-renamed filename: an X-ray labelled
-    # "Tests" must stay an X-ray. Different procedures in one report are unsafe.
-    if text_studies:
-        unique = sorted({label for label, _ in text_studies})
-        if len(unique) != 1:
-            return DocumentClass("review", "Требует-проверки", "указано несколько видов обследований")
-        study = unique[0]
-        # A lab title at the start combined with a modality is ambiguous.
-        if text_lab and text_studies[0][1].start() > 650:
-            return DocumentClass("review", "Требует-проверки", "конфликт вида исследования и лабораторного отчёта")
-        title = study
-        if study in {"Рентгенография", "Компьютерная томография", "МРТ", "УЗИ"}:
-            # Only take an anatomical region near the confirmed study term.
-            found = text_studies[0][1]
-            nearby = header[max(0, found.start() - 30):found.end() + 110]
-            regions = [region for region, regex in REGION_REGEXES if regex.search(nearby)]
-            if len(regions) == 1:
-                title = f"{study} {regions[0]}"
-        return DocumentClass("study", title, "тип обследования подтверждён текстом")
+        if len(studies) == 1 and not labs and not unknown:
+            kind, procedure = studies[0]
+            return DocumentClass("study", _study_title(kind, procedure),
+                                 "вид обследования подтверждён строкой проведённой процедуры")
+        if not studies and labs and not unknown:
+            return DocumentClass("lab", _lab_title(labs),
+                                 "лабораторный тип подтверждён кодами проведённых анализов")
+        # Multiple actual studies, unknown procedures, mixed labs/studies:
+        # do not guess or combine them, even when a generic lab header exists.
+        return DocumentClass("review", "Требует-проверки",
+                             "неоднозначный набор проведённых процедур")
 
-    if text_lab:
-        # Prefer the most specific laboratory title over a generic heading.
-        specific = [label for label in text_lab if label != "Лабораторные анализы"]
-        title = specific[0] if len(set(specific)) == 1 else "Анализы"
-        return DocumentClass("lab", title, "лабораторный формат подтверждён текстом")
-
-    # No extractable text: only very specific names justify classification.
-    if len(set(name_studies)) == 1 and not name_lab:
-        return DocumentClass("study", name_studies[0], "явный тип обследования в имени")
-    # An AI-generated filename is not medical evidence. In particular, a
-    # wrongly labelled "Биохимия" PDF without extractable text must NEVER
-    # enter a lab bundle based on its name alone.
-    return DocumentClass("review", "Требует-проверки", "нет лабораторных признаков в содержимом PDF")
+    # Other providers have free-text reports without structured procedure rows.
+    # A *specific* type can be recovered when there is no competing evidence;
+    # generic "лабораторное исследование" boilerplate does not prove "lab".
+    search_text = header[:2500]
+    study_kinds = [kind for kind, pattern in STUDY_REGEXES
+                   if pattern.search(search_text)]
+    specific_labs = [kind for kind, pattern in LAB_REGEXES
+                     if kind != "Лабораторные анализы" and pattern.search(search_text)]
+    if len(study_kinds) == 1 and not specific_labs:
+        kind = study_kinds[0]
+        return DocumentClass("study", _study_title(kind, search_text),
+                             "вид обследования подтверждён текстом")
+    if not study_kinds and specific_labs:
+        return DocumentClass("lab", _lab_title([search_text]),
+                             "подтверждён конкретный лабораторный анализ")
+    return DocumentClass("review", "Требует-проверки",
+                         "нет однозначного названия проведённой процедуры")
 
 
 def classify_document(path: Path, effective_name: str | None = None) -> DocumentClass:
