@@ -1,6 +1,7 @@
 """Tests with synthetic blank PDFs only; no medical information."""
 
 from contextlib import redirect_stderr, redirect_stdout
+import csv
 from io import StringIO
 from pathlib import Path
 import tempfile
@@ -38,6 +39,11 @@ class MergerTests(unittest.TestCase):
             result = process(self.input, self.output, **kwargs)
         self.last_run_output = out.getvalue() + "\n" + err.getvalue()
         return result
+
+    def read_membership_report(self):
+        path = self.output / "Состав_результатов.csv"
+        with path.open(encoding="utf-8-sig", newline="") as handle:
+            return list(csv.DictReader(handle, delimiter=";"))
 
     def run_as_labs(self, **kwargs):
         with patch(
@@ -233,6 +239,126 @@ class MergerTests(unittest.TestCase):
             len(list((self.output / "Анализы").glob("*.pdf"))), 1,
         )
         self.assertFalse((self.output / "На_проверку").exists())
+
+    def test_reference_value_ranges_never_become_procedure_codes(self):
+        # A previous release parsed '110.0 - 160.0' as a medical procedure.
+        # These are synthetic ranges, not real patient values.
+        examples = (
+            "B03.016.002 - Общий анализ крови. Врач: И.И.\n"
+            "Гемоглобин 120 г/л 110.0 - 160.0\n"
+            "MCHC 345 г/л 320.0 - 360.0\n"
+            "Тромбоциты 250 10Е9/л 150.0 - 400.0\n",
+            "A09.05.209 - Прокальцитонин. Врач: И.И.\n"
+            "A09.05.042 - АЛТ. Врач: И.И.\n"
+            "ЛДГ 250.0 Ед/л 110.0 - 295.0\n"
+            "Натрий 138 ммоль/л 135.0 - 145.0\n",
+            "B03.016.011 - Кислотно-основное состояние крови. Врач: И.И.\n"
+            "Натрий 140 ммоль/л 135.0 - 145.0\n",
+            "B03.016.003 - Общий анализ крови развернутый. Врач: И.И.\n"
+            "Гемоглобин 122 г/л 114.0 - 134.0\n"
+            "MCHC 340 г/л 320.0 - 360.0\n"
+            "Тромбоциты 230 10Е9/л 187.0 - 445.0\n",
+        )
+        for text in examples:
+            with self.subTest(text=text[:20]):
+                result = classify_text("2026-11-18-Требует-проверки.pdf", text)
+                self.assertEqual(result.category, "lab", result)
+
+    def test_numeric_procedure_ids_still_route_to_examinations(self):
+        document = (
+            "Дата назначения лабораторного исследования: 18.11.2026\n"
+            "7002892 - Рентгенография грудной клетки. Врач: И.И.\n"
+            "Гемоглобин 125 г/л 110.0 - 160.0\n"
+        )
+        result = classify_text("2026-11-18-Требует-проверки.pdf", document)
+        self.assertEqual((result.category, result.title),
+                         ("study", "Рентгенография грудной клетки"))
+
+    def test_membership_report_marks_created_only_when_confirmed(self):
+        first = self.input / "2026-11-17-Требует-проверки.pdf"
+        second = self.input / "2026-11-17-Требует-проверки-02.pdf"
+        make_pdf(first, [111])
+        with patch(
+            "pdf_merger.classify_document",
+            return_value=DocumentClass("lab", "Общий анализ крови", "evidenced"),
+        ):
+            initial = self.run_process()
+        self.assertEqual(initial.groups_written, 1, self.last_run_output)
+        make_pdf(second, [222])
+        with patch(
+            "pdf_merger.classify_document",
+            return_value=DocumentClass("lab", "Общий анализ крови", "evidenced"),
+        ):
+            skipped = self.run_process()
+        self.assertEqual(skipped.groups_skipped, 1, self.last_run_output)
+        rows = self.read_membership_report()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual({row["Исходный PDF"] for row in rows}, {first.name, second.name})
+        self.assertTrue(all(row["Подтверждено включение"] == "НЕ ПОДТВЕРЖДЕНО" for row in rows))
+        self.assertTrue(all(row["Статус операции"] == "ПРОПУЩЕНО_УЖЕ_СУЩЕСТВУЕТ" for row in rows))
+        self.assertIn("НЕ ОБНОВЛЁН", self.last_run_output)
+        self.assertEqual(len(PdfReader(self.output / "Анализы" / "2026-11-17-Анализы.pdf").pages), 1)
+
+        with patch(
+            "pdf_merger.classify_document",
+            return_value=DocumentClass("lab", "Общий анализ крови", "evidenced"),
+        ):
+            updated = self.run_process(overwrite=True)
+        self.assertEqual(updated.groups_written, 1, self.last_run_output)
+        rows = self.read_membership_report()
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(row["Подтверждено включение"] == "ДА" for row in rows))
+        self.assertTrue(all(row["Статус операции"] == "СОЗДАНО" for row in rows))
+        self.assertEqual(
+            [int(page.mediabox.width) for page in PdfReader(
+                self.output / "Анализы" / "2026-11-17-Анализы.pdf").pages],
+            [111, 222],
+        )
+        self.assertEqual(first.read_bytes(), (self.input / first.name).read_bytes())
+
+    def test_report_separates_review_from_created_labs(self):
+        lab = self.input / "2026-11-18-Биохимия.pdf"
+        unknown = self.input / "2026-11-18-Неизвестно.pdf"
+        ignored = self.input / "no-date.pdf"
+        for path, width in [(lab, 101), (unknown, 102), (ignored, 103)]:
+            make_pdf(path, [width])
+        def categorize(path, effective_name=None):
+            return (
+                DocumentClass("lab", "Биохимия", "evidenced")
+                if path.name == lab.name
+                else DocumentClass("review", "Требует-проверки", "not evidenced")
+            )
+        with patch("pdf_merger.classify_document", side_effect=categorize):
+            result = self.run_process()
+        self.assertEqual((result.groups_written, result.files_ignored), (2, 1))
+        rows = {row["Исходный PDF"]: row for row in self.read_membership_report()}
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(rows[lab.name]["Категория"], "Анализы")
+        self.assertIn("Анализы", rows[lab.name]["Итоговый файл"])
+        self.assertEqual(rows[unknown.name]["Категория"], "На_проверку")
+        self.assertIn("На_проверку", rows[unknown.name]["Итоговый файл"])
+        self.assertEqual(rows[ignored.name]["Подтверждено включение"], "НЕТ")
+        self.assertEqual(rows[ignored.name]["Статус операции"], "НЕКОРРЕКТНАЯ_ДАТА")
+
+    def test_dry_run_never_writes_membership_report(self):
+        make_pdf(self.input / "2026-11-17-ОАК.pdf", [104])
+        with patch(
+            "pdf_merger.classify_document",
+            return_value=DocumentClass("lab", "ОАК", "evidenced"),
+        ):
+            self.run_process(dry_run=True)
+        self.assertFalse(self.output.exists())
+
+    def test_unwritable_membership_report_does_not_break_merging(self):
+        make_pdf(self.input / "2026-11-17-ОАК.pdf", [105])
+        with patch(
+            "pdf_merger.classify_document",
+            return_value=DocumentClass("lab", "ОАК", "evidenced"),
+        ), patch("pdf_merger._write_membership_report", side_effect=PermissionError("denied")):
+            report = self.run_process()
+        self.assertEqual(report.groups_written, 1, self.last_run_output)
+        self.assertTrue((self.output / "Анализы" / "2026-11-17-Анализы.pdf").exists())
+        self.assertIn("отчёт о составе не записан", self.last_run_output)
 
     def test_lab_and_study_on_same_date_never_merge(self):
         lab1 = self.input / "2026-05-19-Биохимия.pdf"
