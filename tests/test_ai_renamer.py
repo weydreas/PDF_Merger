@@ -195,6 +195,17 @@ class AIRenameTests(unittest.TestCase):
         self.assertNotIn('19.05.2026', trace)
         self.assertTrue(all(path.exists() for path in filenames))
 
+    def test_scanned_pdf_without_date_fails_fast_without_api(self):
+        filename = self.input / 'scan-without-text.pdf'
+        make_pdf(filename)  # Synthetic blank page: no extractable text.
+        events = []
+        with patch('ai_renamer.request_suggestion') as api:
+            with self.assertRaisesRegex(RenameError, 'нужен OCR'):
+                plan_renames([filename], self.input, self.env, progress=events.append)
+        api.assert_not_called()
+        self.assertTrue(filename.exists())
+        self.assertIn('чтение PDF', events[-1])
+
     def test_ai_progress_records_failing_stage_without_private_content(self):
         filename = self.input / 'patient-private-name.pdf'
         make_pdf(filename)
