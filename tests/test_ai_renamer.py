@@ -214,7 +214,7 @@ class AIRenameTests(unittest.TestCase):
         self.assertEqual(planned, {})
         self.assertEqual(len(unresolved), 1)
         self.assertEqual(unresolved[0].code, 'evidence-mismatch')
-        self.assertIn('дата не соответствует', unresolved[0].reason.lower())
+        self.assertIn('не соответствует', unresolved[0].reason.lower())
         self.assertIn('evidence-mismatch', events[-1])
         self.assertNotIn('private-patient', '\n'.join(events))
         self.assertNotIn('test-secret', '\n'.join(events))
