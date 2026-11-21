@@ -353,6 +353,13 @@ def process(
                 f"\nПРОВЕРКА СОСТАВА: {report_path.relative_to(output_dir)}. "
                 "Включение подтверждено ТОЛЬКО для строк со статусом СОЗДАНО."
             )
+    old_review = output_dir / "На_проверку"
+    if old_review.is_dir() and any(p.is_file() and p.suffix.lower() == ".pdf" for p in old_review.iterdir()):
+        print(
+            "ПРИМЕЧАНИЕ: в output/На_проверку остаются PDF прежних запусков. "
+            "Они НЕ удаляются автоматически и могут быть устаревшими. "
+            "Актуальное включение документов проверяйте в Состав_результатов.csv."
+        )
     if result.groups_skipped:
         print(
             "ВНИМАНИЕ: существующие результаты не обновлены. "
