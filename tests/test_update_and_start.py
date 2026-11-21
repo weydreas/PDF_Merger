@@ -88,7 +88,7 @@ class UpdateAndStartWindowsTests(unittest.TestCase):
 
     def run_launcher(self):
         return subprocess.run(
-            ["cmd.exe", "/d", "/c", 'call "' + str(self.repo / "update-and-start.cmd") + '"'],
+            ["cmd.exe", "/d", "/c", str(self.repo / "update-and-start.cmd")],
             cwd=self.repo / "logs", input="\n", capture_output=True,
             text=True, encoding="utf-8", errors="replace", timeout=90,
         )
