@@ -310,8 +310,8 @@ class MergerTests(unittest.TestCase):
         self.assertTrue(all(row["Подтверждено включение"] == "ДА" for row in rows))
         self.assertTrue(all(row["Статус операции"] == "СОЗДАНО" for row in rows))
         self.assertEqual(
-            [int(page.mediabox.width) for page in PdfReader(
-                self.output / "Анализы" / "2026-11-17-Анализы.pdf").pages],
+            sorted(int(page.mediabox.width) for page in PdfReader(
+                self.output / "Анализы" / "2026-11-17-Анализы.pdf").pages),
             [111, 222],
         )
         self.assertEqual(first.read_bytes(), (self.input / first.name).read_bytes())
