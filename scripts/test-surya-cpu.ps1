@@ -61,11 +61,42 @@ try {
     } elseif (Test-Path -LiteralPath $knownLocal -PathType Leaf) {
         $llamaBin = $knownLocal
     } else {
-        Write-Host 'Нужен отдельный llama-server CPU x64, Ollama не заменяет его.' -ForegroundColor Yellow
-        Write-Host "Официальные сборки: $ReleasePage"
-        Write-Host 'Скачайте архив Windows x64 (CPU) и положите его файлы в .local-tools\llama.cpp\'
-        Write-Host 'Либо добавьте папку с llama-server.exe в PATH. Ни одного нового файла не установлено.'
-        exit 3
+        if (-not $Install) {
+            Write-Host 'Нужен llama-server CPU x64: запускайте с -Install либо установите его вручную.'
+            Write-Host "Официальные сборки: $ReleasePage"
+            exit 3
+        }
+        # Pinned to a verified official CPU release, with SHA-256 from the
+        # ScoopInstaller/Versions maintained manifest; never execute if hash mismatches.
+        $releaseName = 'b12606'
+        $archiveName = 'llama-b12606-bin-win-cpu-x64.zip'
+        $archiveSHA = '425eeb2a94a9600dadf369a7c9c7dd0141948921efc0fa9ec7872970fffc845d'
+        $archiveURL = "https://github.com/ggml-org/llama.cpp/releases/download/$releaseName/$archiveName"
+        $localRoot = Join-Path $ProjectRoot '.local-tools'
+        New-Item -ItemType Directory -Path $localRoot -Force | Out-Null
+        $archive = Join-Path $localRoot $archiveName
+        $unpacked = Join-Path $localRoot ('llama-cpu-staging-' + [guid]::NewGuid().ToString('N'))
+        try {
+            Write-Host 'Загружаю официальную CPU-сборку llama.cpp. Проверяю SHA-256.' -ForegroundColor Cyan
+            Invoke-WebRequest -UseBasicParsing -Uri $archiveURL -OutFile $archive -TimeoutSec 300
+            $actualSHA = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actualSHA -ne $archiveSHA) {
+                throw 'Хеш SHA-256 скачанного llama.cpp не совпал. Выполнение заблокировано.'
+            }
+            Expand-Archive -LiteralPath $archive -DestinationPath $unpacked -Force
+            $binary = Get-ChildItem -LiteralPath $unpacked -Recurse -File -Filter 'llama-server.exe' | Select-Object -First 1
+            if ($null -eq $binary) { throw 'В официальном архиве не найден llama-server.exe.' }
+            $targetFolder = Split-Path -Parent $knownLocal
+            New-Item -ItemType Directory -Path $targetFolder -Force | Out-Null
+            Copy-Item -Path (Join-Path $binary.Directory.FullName '*') -Destination $targetFolder -Recurse -Force
+            if (-not (Test-Path -LiteralPath $knownLocal -PathType Leaf)) {
+                throw 'Не удалось установить llama-server.exe в изолированную папку.'
+            }
+        } finally {
+            if (Test-Path -LiteralPath $archive) { Remove-Item -LiteralPath $archive -Force }
+            if (Test-Path -LiteralPath $unpacked) { Remove-Item -LiteralPath $unpacked -Recurse -Force }
+        }
+        $llamaBin = $knownLocal
     }
     Write-Host "Используется llama-server: $llamaBin"
 
