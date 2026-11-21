@@ -208,13 +208,13 @@ def process(
     # Legacy mixed outputs in the root are preserved, never read as source or
     # treated as proof that new structured outputs were already produced.
     if output_dir.is_dir() and any(
-        re.fullmatch(r"\\d{4}-\\d{2}-\\d{2}\\.pdf", p.name) for p in output_dir.iterdir() if p.is_file()
+        re.fullmatch(r"\d{4}-\d{2}-\d{2}\.pdf", p.name) for p in output_dir.iterdir() if p.is_file()
     ):
         print("ВНИМАНИЕ: старые объединённые PDF в корне output сохранены без изменений.")
         print("Новые раздельные результаты будут записаны в подпапки Анализы, Обследования, На_проверку.")
 
     for target, paths, category in plans:
-        print(f"\\n{category}: {len(paths)} PDF -> {target.relative_to(output_dir)}")
+        print(f"\n{category}: {len(paths)} PDF -> {target.relative_to(output_dir)}")
         for index, source in enumerate(paths, start=1):
             print(f"  {index}. {source.relative_to(input_dir)}")
         if target.exists() and not overwrite:
