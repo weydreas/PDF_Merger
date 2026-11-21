@@ -40,7 +40,7 @@ class WindowsConsoleFlowTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
-        for filename in ('merge_windows.ps1', 'pdf_merger.py', 'ai_renamer.py', 'dependency_check.py', 'requirements.txt', '.env.example'):
+        for filename in ('merge_windows.ps1', 'pdf_merger.py', 'ai_renamer.py', 'document_router.py', 'dependency_check.py', 'requirements.txt', '.env.example'):
             shutil.copy2(ROOT / filename, self.root / filename)
 
     def invoke_ps(self, answer=''):
