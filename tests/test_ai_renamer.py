@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from pypdf import PdfReader, PdfWriter
 
-from ai_renamer import AIConfig, RenameError, _verified_date, apply_renames, load_config, plan_renames, request_suggestion
+from ai_renamer import AIConfig, AIProgressLog, RenameError, _verified_date, apply_renames, load_config, plan_renames, request_suggestion
 from pdf_merger import main, process
 
 
@@ -175,6 +175,90 @@ class AIRenameTests(unittest.TestCase):
                 plan_renames([src1, src2], self.input, self.env)
         self.assertTrue(src1.exists())
         self.assertTrue(src2.exists())
+
+    def test_ai_progress_before_and_after_each_network_request(self):
+        filenames = [self.input / 'private-client-1.pdf', self.input / 'private-client-2.pdf']
+        for path in filenames:
+            make_pdf(path)
+        events = []
+        with patch('ai_renamer.extract_excerpt', return_value='Report date: 19.05.2026'), \
+             patch('ai_renamer.request_suggestion', return_value=self.suggestion()):
+            planned = plan_renames(filenames, self.input, self.env, progress=events.append)
+        self.assertEqual(len(planned), 2)
+        self.assertIn('Документ 1/2: извлечение текста', events[0])
+        self.assertTrue(any('Документ 1/2: запрос к AI' in step for step in events))
+        self.assertTrue(any('Документ 1/2: ответ AI' in step for step in events))
+        self.assertTrue(any('Документ 2/2: дата подтверждена' in step for step in events))
+        trace = "\n".join(events)
+        self.assertNotIn('private-client', trace)
+        self.assertNotIn('test-secret', trace)
+        self.assertNotIn('19.05.2026', trace)
+        self.assertTrue(all(path.exists() for path in filenames))
+
+    def test_ai_progress_records_failing_stage_without_private_content(self):
+        filename = self.input / 'patient-private-name.pdf'
+        make_pdf(filename)
+        events = []
+        with patch('ai_renamer.extract_excerpt', return_value='Sensitive private content'), \
+             patch('ai_renamer.request_suggestion', side_effect=RenameError('AI API ответил HTTP 429: secret')):
+            with self.assertRaises(RenameError):
+                plan_renames([filename], self.input, self.env, progress=events.append)
+        self.assertIn('HTTP 429', events[-1])
+        self.assertIn('ожидание API', events[-1])
+        trace = "\n".join(events)
+        self.assertNotIn('secret', trace)
+        self.assertNotIn('patient-private-name', trace)
+        self.assertNotIn('Sensitive', trace)
+        self.assertTrue(filename.exists())
+
+    def test_progress_file_is_local_without_document_identifiers(self):
+        filename = self.input / 'patient-private-name.pdf'
+        make_pdf(filename)
+        with patch('ai_renamer.extract_excerpt', return_value='Report date 19.05.2026'), \
+             patch('ai_renamer.request_suggestion', return_value=self.suggestion()), \
+             patch('pdf_merger.ROOT', self.root), redirect_stdout(StringIO()):
+            report = process(self.input, self.output, rename_with_ai=True, env_file=self.env)
+        self.assertEqual(report.files_renamed, 1)
+        log = (self.root / 'logs' / 'ai-progress.log').read_text(encoding='utf-8')
+        self.assertIn('Документ 1/1', log)
+        self.assertIn('Переименование завершено', log)
+        for private in ('patient-private-name', 'test-secret', '19.05.2026', 'Lab report'):
+            self.assertNotIn(private, log)
+
+    def test_unwritable_progress_log_does_not_block_operation(self):
+        trace = AIProgressLog(self.root / 'forbidden' / 'trace.log')
+        with patch.object(Path, 'mkdir', side_effect=PermissionError('denied')), redirect_stdout(StringIO()) as out:
+            trace('Этап обработки')
+        self.assertIn('Этап обработки', out.getvalue())
+        self.assertIn('прогресс остаётся в консоли', out.getvalue())
+
+    def test_http_status_and_timeout_errors_are_actionable_not_verbose(self):
+        import urllib.error
+        import urllib.request
+
+        class FakeOpener:
+            def __init__(self, error):
+                self.error = error
+            def open(self, request, timeout):
+                self.timeout = timeout
+                raise self.error
+
+        config = AIConfig('test-secret', 'https://api.openai.com/v1/chat/completions', 'gpt-6-luna')
+        for code, expected in ((401, 'API-ключ'), (404, 'модель'), (429, 'квота')):
+            with self.subTest(http=code):
+                fake = FakeOpener(urllib.error.HTTPError(config.api_url, code, 'secret server detail', {}, None))
+                with patch('ai_renamer.urllib.request.build_opener', return_value=fake):
+                    with self.assertRaises(RenameError) as err:
+                        request_suggestion(config, 'private-name.pdf', 'private report')
+                self.assertIn(f'HTTP {code}', str(err.exception))
+                self.assertIn(expected, str(err.exception))
+                self.assertNotIn('secret', str(err.exception))
+                self.assertEqual(fake.timeout, 30)
+        with patch('ai_renamer.urllib.request.build_opener', return_value=FakeOpener(TimeoutError('secret data'))):
+            with self.assertRaises(RenameError) as err:
+                request_suggestion(config, 'private-name.pdf', 'private report')
+        self.assertIn('тайм-аут', str(err.exception))
+        self.assertNotIn('secret', str(err.exception))
 
     def test_collision_creates_unique_suffix_never_overwrites(self):
         existing = self.input / '2026-05-19-Биохимия.pdf'
