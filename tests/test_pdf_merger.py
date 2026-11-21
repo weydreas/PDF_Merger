@@ -125,6 +125,115 @@ class MergerTests(unittest.TestCase):
         self.assertEqual(labs.category, "lab")
         self.assertEqual(labs.title, "Общий анализ крови")
 
+    def test_export_header_does_not_turn_xray_into_lab(self):
+        # Mock text, never a real patient report. The exporter uses the word
+        # "лабораторного" in EVERY document's generic registration field.
+        sample = (
+            "Дата назначения лабораторного исследования: 17.11.2026\n"
+            "Исследование Результат Единицы измерения\n"
+            "7002892 - Рентгенография грудной клетки. Врач: И.И.\n"
+            "Описание\nРентгенография грудной клетки.\n"
+            "Заключение\nРекомендовано УЗИ для дальнейшей оценки.\n"
+        )
+        result = classify_text("2026-11-17-Требует-проверки.pdf", sample)
+        self.assertEqual((result.category, result.title),
+                         ("study", "Рентгенография грудной клетки"))
+
+    def test_ecg_mentioned_after_generic_lab_header_is_an_exam(self):
+        sample = (
+            "Дата назначения лабораторного исследования: 18.11.2026\n"
+            + "Примечание.\n" * 65
+            + "Исследование Результат Единицы измерения\n"
+            + "7014145 - Электрокардиография. Врач: И.И.\n"
+            + "Заключение\nЭлектрокардиография: ритм синусовый.\n"
+        )
+        result = classify_text("2026-11-21-Требует-проверки.pdf", sample)
+        self.assertEqual((result.category, result.title), ("study", "ЭКГ"))
+
+    def test_study_names_are_short_and_based_on_performed_procedure(self):
+        for procedure, expected in (
+            ("Компьютерная томография грудной клетки", "КТ грудной клетки"),
+            ("Магнитно-резонансная томография головного мозга", "МРТ головного мозга"),
+            ("УЗИ щитовидной железы", "УЗИ щитовидной железы"),
+        ):
+            with self.subTest(procedure=procedure):
+                sample = (
+                    "Дата назначения лабораторного исследования: 10.11.2026\n"
+                    "7002892 - " + procedure + ". Врач: И.И.\n"
+                )
+                got = classify_text("2026-11-10-Требует-проверки.pdf", sample)
+                self.assertEqual((got.category, got.title), ("study", expected))
+
+    def test_lab_codes_are_labs_not_generic_export_headers(self):
+        sample = (
+            "Дата назначения лабораторного исследования: 17.11.2026\n"
+            "B03.016.002 - Общий анализ крови. Врач: И.И.\n"
+            "A09.05.042 - Аланинаминотрансфераза. Врач: И.И.\n"
+            "Лейкоциты WBC 5.0 10Е9/л\n"
+        )
+        self.assertEqual(classify_text("2026-11-17-Требует-проверки.pdf", sample).category, "lab")
+
+    def test_mixed_procedure_rows_and_generic_header_require_review(self):
+        for sample in (
+            "Дата назначения лабораторного исследования\n"
+            "7002892 - Рентгенография грудной клетки. Врач: И.И.\n"
+            "7014145 - Электрокардиография. Врач: И.И.\n",
+            "B03.016.002 - Общий анализ крови. Врач: И.И.\n"
+            "7002892 - Рентгенография грудной клетки. Врач: И.И.\n",
+            "Дата назначения лабораторного исследования: 10.11.2026\n",
+            "A04.01.002 - Неизвестная диагностическая процедура. Врач: И.И.\n",
+        ):
+            with self.subTest(case=sample[:28]):
+                self.assertEqual(classify_text("2026-11-10-Тесты.pdf", sample).category, "review")
+
+    def test_synthetic_export_routing_keeps_five_exams_separate_without_ai(self):
+        texts = {
+            "2026-11-17-Требует-проверки.pdf":
+                "Дата назначения лабораторного исследования\n"
+                "7002892 - Рентгенография грудной клетки. Врач: И.И.\n",
+            "2026-11-17-Требует-проверки-02.pdf":
+                "Дата назначения лабораторного исследования\n"
+                "7014145 - Электрокардиография. Врач: И.И.\n",
+            "2026-11-17-Требует-проверки-03.pdf":
+                "Дата назначения лабораторного исследования\n"
+                "7002892 - Рентгенография грудной клетки. Врач: И.И.\n",
+            "2026-11-18-Требует-проверки.pdf":
+                "Дата назначения лабораторного исследования\n"
+                "7002892 - Рентгенография грудной клетки. Врач: И.И.\n"
+                "Заключение: рекомендовано УЗИ плевральных полостей.\n",
+            "2026-11-21-Требует-проверки.pdf":
+                "Дата назначения лабораторного исследования\n"
+                "7014145 - Электрокардиография. Врач: И.И.\n",
+            "2026-11-17-ОАК.pdf":
+                "B03.016.002 - Общий анализ крови. Врач: И.И.\n",
+        }
+        for index, filename in enumerate(texts, start=1):
+            make_pdf(self.input / filename, [100 + index])
+
+        def classify(path, effective_name=None):
+            return classify_text(effective_name or path.name, texts[path.name])
+
+        with patch("pdf_merger.classify_document", side_effect=classify):
+            result = self.run_process()
+        self.assertEqual(result.groups_written, 6, self.last_run_output)
+        self.assertEqual(result.groups_failed, 0, self.last_run_output)
+        studies = sorted((self.output / "Обследования").glob("*.pdf"))
+        self.assertEqual(len(studies), 5)
+        self.assertEqual(
+            sorted(x.name for x in studies),
+            [
+                "2026-11-17-Рентгенография грудной клетки-02.pdf",
+                "2026-11-17-Рентгенография грудной клетки.pdf",
+                "2026-11-17-ЭКГ.pdf",
+                "2026-11-18-Рентгенография грудной клетки.pdf",
+                "2026-11-21-ЭКГ.pdf",
+            ],
+        )
+        self.assertEqual(
+            len(list((self.output / "Анализы").glob("*.pdf"))), 1,
+        )
+        self.assertFalse((self.output / "На_проверку").exists())
+
     def test_lab_and_study_on_same_date_never_merge(self):
         lab1 = self.input / "2026-05-19-Биохимия.pdf"
         lab2 = self.input / "2026-05-19-ОАК.pdf"
