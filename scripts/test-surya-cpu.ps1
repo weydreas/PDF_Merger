@@ -15,7 +15,7 @@ $Python = Join-Path $EnvDir 'Scripts\python.exe'
 $Cli = Join-Path $EnvDir 'Scripts\surya_ocr.exe'
 $Work = Join-Path $ProjectRoot 'logs\surya-cpu-pilot'
 $Sample = Join-Path $Work 'synthetic-medical-page.png'
-$ResultDir = Join-Path $Work 'results'
+$ResultDir = Join-Path $Work ('results-' + [guid]::NewGuid().ToString('N'))
 $ReleasePage = 'https://github.com/ggml-org/llama.cpp/releases'
 
 function New-SyntheticSample([string]$Path) {
@@ -158,12 +158,25 @@ try {
     $watch.Stop()
     if ($code -ne 0) { throw "Surya OCR завершилась с кодом $code." }
 
-    $jsonReports = @(Get-ChildItem -LiteralPath $ResultDir -Recurse -File -Filter '*.json')
-    if ($jsonReports.Count -eq 0) { throw 'Результат JSON не найден; проверьте текстовый вывод Surya.' }
-    Write-Host "OCR успешно выполнен за $([Math]::Round($watch.Elapsed.TotalSeconds,1)) с."
+    $jsonReports = @(Get-ChildItem -LiteralPath $ResultDir -Recurse -File -Filter 'results.json')
+    if ($jsonReports.Count -ne 1) {
+        throw 'Отсутствует единственный свежий results.json из этого запуска Surya.'
+    }
+    $verifier = Join-Path $PSScriptRoot 'inspect_surya_boxes.py'
+    if (-not (Test-Path -LiteralPath $verifier -PathType Leaf)) {
+        throw 'Не найден валидатор OCR-координат; результат не считается проверенным.'
+    }
+    $preview = Join-Path $ResultDir 'bbox-preview.png'
+    Write-Host 'Проверяю BBOX каждого текстового блока (не координаты слов)...' -ForegroundColor Cyan
+    & $Python $verifier ($jsonReports[0].FullName) --image $Sample --preview $preview
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Текст получен, но координаты блоков отсутствуют/повреждены. Для анонимизации результат непригоден.'
+    }
+    Write-Host "OCR+BBOX успешно выполнен за $([Math]::Round($watch.Elapsed.TotalSeconds,1)) с."
     Write-Host "Файлов JSON: $($jsonReports.Count)"
+    Write-Host "Предпросмотр рамок: $preview"
     Write-Host "Результаты: $ResultDir"
-    Write-Host 'Это проверка OCR, НЕ подтверждение качества удаления персональных данных.' -ForegroundColor Yellow
+    Write-Host 'Это координаты БЛОКОВ, не слов. Удаление персональных данных НЕ выполнялось.' -ForegroundColor Yellow
     Write-Host 'PDF Merger и исходные медицинские PDF не изменялись.' -ForegroundColor Green
     exit 0
 } catch {
