@@ -208,7 +208,10 @@ def process(
                     progress("ОШИБКА файловой операции. Проверьте input: часть имён могла измениться.")
                     raise
                 renamed = len(planned)
-                progress(f"Переименование завершено: {renamed} файлов. Переход к объединению.")
+                progress(
+                    f"Переименование завершено: {renamed} файлов. "
+                    + ("Итоговые PDF отложены из-за неподтверждённых дат." if unresolved else "Переход к объединению.")
+                )
 
     groups, ignored = discover_groups(input_dir, output_dir, recursive=recursive, name_overrides=name_overrides)
     plans = plan_outputs(groups, input_dir, output_dir, name_overrides=name_overrides)
@@ -218,6 +221,17 @@ def process(
     )
     for path in ignored:
         print(f"ПРОПУЩЕН (нет корректной даты YYYY-MM-DD-): {path.relative_to(input_dir)}")
+    if unresolved and not dry_run:
+        print(
+            "\nНЕПОЛНАЯ AI-ПРОВЕРКА: документы с подтверждённой датой переименованы, "
+            "но создание итоговых PDF отложено до проверки оставшихся файлов."
+        )
+        print(
+            "При следующем запуске AI потребуется только для файлов без "
+            "правильного YYYY-MM-DD- имени. Исходные PDF и прежний output сохранены."
+        )
+        return result
+
     if not plans:
         print("Не найдено документов с корректной датой для обработки.")
         return result
