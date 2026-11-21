@@ -40,7 +40,7 @@ class WindowsConsoleFlowTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
-        for filename in ('merge_windows.ps1', 'pdf_merger.py', 'ai_renamer.py', 'document_router.py', 'dependency_check.py', 'requirements.txt', '.env.example'):
+        for filename in ('merge_windows.ps1', 'pdf_merger.py', 'ai_renamer.py', 'document_router.py', 'semantic_classifier.py', 'dependency_check.py', 'requirements.txt', '.env.example'):
             shutil.copy2(ROOT / filename, self.root / filename)
 
     def invoke_ps(self, answer=''):
@@ -187,6 +187,27 @@ class WindowsConsoleFlowTests(unittest.TestCase):
         self.assertIn('Нажмите Enter для установки', blocked.stdout)
         self.assertIn('Установка отменена', blocked.stdout)
         self.assertFalse((self.root / 'output' / '2026-03-02.pdf').exists())
+
+    def test_semantic_classification_requires_explicit_menu_selection_and_api_key(self):
+        self.assertEqual(self.invoke_ps('\n').returncode, 0)
+        writer = PdfWriter()
+        writer.add_blank_page(width=111, height=100)
+        with (self.root / 'input' / '2026-11-18-Unknown.pdf').open('wb') as handle:
+            writer.write(handle)
+        writer.close()
+
+        # Normal [1] has no AI classification and works without an API key.
+        normal = self.invoke_ps('1\n')
+        self.assertEqual(normal.returncode, 0, normal.stdout + normal.stderr)
+        self.assertIn('Локально, без AI', normal.stdout)
+        self.assertNotIn('СЕМАНТИЧЕСКАЯ AI-КЛАССИФИКАЦИЯ', normal.stdout)
+
+        # [3] explicitly enables AI for all files; no configured key = fail
+        # closed before starting any new publishing or making any API request.
+        ai = self.invoke_ps('3\n2\n')
+        self.assertNotEqual(ai.returncode, 0)
+        self.assertIn('AI-семантика: режим all', ai.stdout)
+        self.assertIn('PDF_MERGER_API_KEY', ai.stdout + ai.stderr)
 
     def test_nonstandard_name_requires_explicit_ai_consent(self):
         self.assertEqual(self.invoke_ps('\n').returncode, 0)
