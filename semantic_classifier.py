@@ -124,6 +124,11 @@ def _sanitize_classification(answer: object, sent_excerpt: str,
     if category == "lab":
         if title.strip() != "Анализы":
             return review
+        # Even an AI-confirmed lab claim cannot rely on a quote describing
+        # imaging/instrumental examination. This is a safety constraint rather
+        # than the source of the semantic classification decision.
+        if any(regex.search(evidence) for _, regex in STUDY_REGEXES):
+            return review
         return DocumentClass("lab", "Анализы",
                              "лабораторный характер подтверждён семантикой и цитатой")
     if not STUDY_TITLE.fullmatch(title.strip()) or len(title) > 75:
@@ -135,6 +140,11 @@ def _sanitize_classification(answer: object, sent_excerpt: str,
         (regex for label, regex in STUDY_REGEXES if label == modality), None
     )
     if detector is None or not detector.search(evidence):
+        return review
+    # A recommendation to perform a study later is not proof of performance.
+    evidence_start = sent_excerpt.index(evidence)
+    preceding = sent_excerpt[max(0, evidence_start - 40):evidence_start]
+    if re.search(r"(?i)(?:рекомендовано|рекомендуется|планируется)\s*$", preceding):
         return review
     if " " in title:
         anatomy = title.split(" ", 1)[1].casefold()
