@@ -149,14 +149,14 @@ class WindowsConsoleFlowTests(unittest.TestCase):
 
 
     def test_existing_output_requires_explicit_overwrite_choice(self):
-        self.assertEqual(self.invoke_ps('\\n').returncode, 0)
+        self.assertEqual(self.invoke_ps('\n').returncode, 0)
         source = self.root / 'input' / '2026-11-17-Test.pdf'
         writer = PdfWriter()
         writer.add_blank_page(width=123, height=100)
         with source.open('wb') as handle:
             writer.write(handle)
         writer.close()
-        first = self.invoke_ps('1\\n')
+        first = self.invoke_ps('1\n')
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
         result = self.root / 'output' / 'На_проверку' / '2026-11-17-Требует-проверки.pdf'
         self.assertTrue(result.exists())
@@ -164,7 +164,7 @@ class WindowsConsoleFlowTests(unittest.TestCase):
 
         # Existing output, no explicit replacement: report says that inclusion
         # is NOT confirmed and existing result remains byte-identical.
-        skipped = self.invoke_ps('1\\n2\\n')
+        skipped = self.invoke_ps('1\n2\n')
         self.assertEqual(skipped.returncode, 0, skipped.stdout + skipped.stderr)
         self.assertIn('В output уже есть результаты', skipped.stdout)
         self.assertIn('НЕ ОБНОВЛЁН', skipped.stdout)
@@ -172,7 +172,7 @@ class WindowsConsoleFlowTests(unittest.TestCase):
 
         # Explicitly confirmed refresh calls --overwrite, even for
         # documents that were previously put in На_проверку.
-        updated = self.invoke_ps('1\\n1\\n')
+        updated = self.invoke_ps('1\n1\n')
         self.assertEqual(updated.returncode, 0, updated.stdout + updated.stderr)
         self.assertIn('СОЗДАНО', updated.stdout)
         self.assertTrue(result.exists())
