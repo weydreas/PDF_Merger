@@ -162,7 +162,7 @@ class SemanticClassifierTests(unittest.TestCase):
 
     def test_network_error_aborts_before_any_output(self):
         make_pdf(self.first)
-        with patch(
+        with patch("pdf_merger.ROOT", self.root), patch(
             "semantic_classifier.extract_excerpt",
             return_value="B03.016.002 - Общий анализ крови. Врач: Т.Т.",
         ), patch(
@@ -190,7 +190,8 @@ class SemanticClassifierTests(unittest.TestCase):
             return {"category": "study", "title": "Рентгенография грудной клетки",
                     "evidence": "7002892 - Рентгенография грудной клетки."}
 
-        with patch("semantic_classifier.extract_excerpt", side_effect=extract), \
+        with patch("pdf_merger.ROOT", self.root), \
+             patch("semantic_classifier.extract_excerpt", side_effect=extract), \
              patch("semantic_classifier.request_classification", side_effect=ai) as api, \
              redirect_stdout(StringIO()):
             result = process(self.input, self.output, ai_classification="all", env_file=self.env)
@@ -207,7 +208,7 @@ class SemanticClassifierTests(unittest.TestCase):
         self.assertFalse((self.output / "На_проверку").exists())
 
     def test_review_only_sends_only_unclear_sources(self):
-        with patch("pdf_merger.classify_document",
+        with patch("pdf_merger.ROOT", self.root), patch("pdf_merger.classify_document",
                    side_effect=lambda path, effective_name=None:
                    DocumentClass("review", "Требует-проверки", "unknown")
                    if path == self.first else
