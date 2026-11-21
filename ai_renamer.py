@@ -293,20 +293,10 @@ def plan_renames(
             # signals override broad or misleading AI titles.
             from document_router import classify_text
             local = classify_text(path.name, excerpt)
-            if local.category in {"lab", "study"}:
-                title = _safe_title(local.title)
-            else:
-                title = _safe_title(suggestion.get("title"))
-                if title.casefold().replace("-", " ").strip() in {
-                    "test", "tests", "lab tests", "laboratory tests",
-                    "тест", "тесты", "анализ", "анализы", "исследование",
-                    "исследования", "лабораторные исследования",
-                    "обследование", "документ", "отчет", "отчёт",
-                }:
-                    raise RenameError(
-                        "AI предложил общее название без подтверждённого типа. "
-                        "Исходный PDF оставлен без изменений; требуется проверка."
-                    )
+            # AI-proposed titles are untrusted. Use a descriptive label only
+            # when it is supported by local evidence in the document text.
+            # Unknown type is explicitly marked for separate manual review.
+            title = _safe_title(local.title)
         except (OSError, ValueError) as exc:
             if progress:
                 # No filename, exception text, document excerpt, or secret in the log.
