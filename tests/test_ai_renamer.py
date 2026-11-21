@@ -284,7 +284,7 @@ class AIRenameTests(unittest.TestCase):
             planned = plan_renames([src], self.input, self.env)
         self.assertEqual(
             next(iter(planned.values())).name,
-            '2026-05-19-Рентгенография грудной клетки.pdf',
+            '2026-05-19-Рентгенография-грудной-клетки.pdf',
         )
         self.assertTrue(src.exists())
 
