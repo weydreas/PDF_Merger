@@ -168,7 +168,7 @@ try {
     }
     $preview = Join-Path $ResultDir 'bbox-preview.png'
     Write-Host 'Проверяю BBOX каждого текстового блока (не координаты слов)...' -ForegroundColor Cyan
-    & $Python $verifier $jsonReports[0].FullName --image $Sample --preview $preview
+    & $Python $verifier ($jsonReports[0].FullName) --image $Sample --preview $preview
     if ($LASTEXITCODE -ne 0) {
         throw 'Текст получен, но координаты блоков отсутствуют/повреждены. Для анонимизации результат непригоден.'
     }
