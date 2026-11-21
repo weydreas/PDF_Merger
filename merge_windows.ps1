@@ -14,6 +14,7 @@ try {
     # Non-console hosts may not expose an output encoding.
 }
 $env:PYTHONIOENCODING = 'utf-8'
+$env:PYTHONUNBUFFERED = '1'  # Show AI progress immediately through Out-Host.
 
 $ProjectRoot = $PSScriptRoot
 $InputDir = Join-Path $ProjectRoot 'input'
@@ -231,7 +232,11 @@ function Invoke-InteractiveMerger {
 
     $mergeArgs = @()
     if ($useAI) { $mergeArgs += '--rename-with-ai' }
-    & $python $MergeProgram @mergeArgs | Out-Host
+    if ($useAI) {
+        Write-Host 'AI: запускается проверка документов, прогресс будет отображаться ниже.' -ForegroundColor Cyan
+        Write-Host 'Диагностика без имён файлов и ключей: logs\ai-progress.log'
+    }
+    & $python -u $MergeProgram @mergeArgs | Out-Host
     $code = $LASTEXITCODE
     Write-Host ''
     if ($code -eq 0) {

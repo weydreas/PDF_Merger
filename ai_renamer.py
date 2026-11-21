@@ -11,7 +11,10 @@ from datetime import date
 import json
 import os
 from pathlib import Path
+from collections.abc import Callable
+from datetime import datetime
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -23,10 +26,49 @@ DEFAULT_API_URL = "https://api.openai.com/v1/chat/completions"
 DEFAULT_MODEL = "gpt-6-luna"
 MAX_TEXT_CHARS = 10_000
 MAX_RESPONSE_BYTES = 128_000
+API_TIMEOUT_SECONDS = 30
 DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 DATE_IN_EVIDENCE = re.compile(
     r"(?<!\d)(?:(\d{4})[-./](\d{1,2})[-./](\d{1,2})|(\d{1,2})[-./](\d{1,2})[-./](\d{4}))(?!\d)"
 )
+
+
+class AIProgressLog:
+    """Live, privacy-preserving progress: never log names, PDF text or API keys.
+
+    The append-only local diagnostic file is best-effort: lack of log-write
+    permission must never interrupt document processing.
+    """
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.started = time.monotonic()
+        self._file_warning_shown = False
+
+    def __call__(self, event: str) -> None:
+        now = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        elapsed = time.monotonic() - self.started
+        line = f"[AI {now}, +{elapsed:.1f}с] {event}"
+        print(line, flush=True)
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.open("a", encoding="utf-8") as stream:
+                stream.write(line + "\n")
+        except OSError:
+            if not self._file_warning_shown:
+                print("[AI] Не удалось записать диагностический файл; прогресс остаётся в консоли.", flush=True)
+                self._file_warning_shown = True
+
+
+def _api_status_hint(status: int) -> str:
+    return {
+        400: "некорректные параметры запроса или несовместимый формат модели",
+        401: "API-ключ недействителен или не относится к выбранному API-проекту",
+        403: "нет разрешения на доступ к модели или API-проекту",
+        404: "модель или адрес API недоступны; проверьте PDF_MERGER_AI_MODEL",
+        408: "сервер не успел обработать запрос",
+        429: "лимит запросов или квота API исчерпаны; проверьте лимиты и биллинг",
+    }.get(status, "сбой сервера/API; проверьте настройки и доступность провайдера" if status >= 500 else "проверьте ключ, модель и URL")
 
 
 class RenameError(ValueError):
@@ -151,7 +193,7 @@ def request_suggestion(config: AIConfig, filename: str, excerpt: str) -> dict:
         method="POST",
     )
     try:
-        with urllib.request.build_opener(_NoRedirect()).open(request, timeout=30) as response:
+        with urllib.request.build_opener(_NoRedirect()).open(request, timeout=API_TIMEOUT_SECONDS) as response:
             raw = response.read(MAX_RESPONSE_BYTES + 1)
         if len(raw) > MAX_RESPONSE_BYTES:
             raise RenameError("AI API вернул слишком большой ответ")
@@ -161,9 +203,12 @@ def request_suggestion(config: AIConfig, filename: str, excerpt: str) -> dict:
             raise ValueError("Expected an object")
         return suggestion
     except urllib.error.HTTPError as exc:
-        raise RenameError(f"AI API ответил HTTP {exc.code}; проверьте ключ, модель и URL") from exc
+        raise RenameError(f"AI API ответил HTTP {exc.code}: {_api_status_hint(exc.code)}") from exc
     except (urllib.error.URLError, TimeoutError) as exc:
-        raise RenameError(f"Сетевая ошибка AI API: {type(exc).__name__}") from exc
+        raise RenameError(
+            f"Сетевая ошибка AI API ({type(exc).__name__}); "
+            f"тайм-аут соединения/чтения {API_TIMEOUT_SECONDS} с. Проверьте интернет, VPN и доступ к API."
+        ) from exc
     except (ValueError, KeyError, IndexError, TypeError) as exc:
         raise RenameError("AI API вернул некорректный JSON-ответ") from exc
 
@@ -200,7 +245,10 @@ def _safe_title(value: object) -> str:
     return title
 
 
-def plan_renames(paths: list[Path], input_dir: Path, env_file: Path) -> dict[Path, Path]:
+def plan_renames(
+    paths: list[Path], input_dir: Path, env_file: Path,
+    progress: Callable[[str], None] | None = None,
+) -> dict[Path, Path]:
     """Validate all suggestions before changing any source path."""
     if not paths:
         return {}
@@ -210,11 +258,41 @@ def plan_renames(paths: list[Path], input_dir: Path, env_file: Path) -> dict[Pat
     occupied: set[str] = set()
     for directory in {p.parent for p in paths}:
         occupied.update(str(p).casefold() for p in directory.iterdir())
-    for path in paths:
-        excerpt = extract_excerpt(path)
-        suggestion = request_suggestion(cfg, path.name, excerpt)
-        day = _verified_date(suggestion.get("date"), suggestion.get("evidence"), path.name + "\n" + excerpt)
-        title = _safe_title(suggestion.get("title"))
+    for index, path in enumerate(paths, start=1):
+        prefix = f"Документ {index}/{len(paths)}"
+        stage = "чтение PDF"
+        if progress:
+            progress(f"{prefix}: извлечение текста (первые 2 страницы).")
+        try:
+            excerpt = extract_excerpt(path)
+            if progress:
+                progress(f"{prefix}: текст извлечён ({len(excerpt)} символов).")
+            if not excerpt.strip() and not DATE_IN_EVIDENCE.search(path.name):
+                raise RenameError(
+                    "PDF не содержит извлекаемого текста, а имя — подтверждённой даты. "
+                    "Вероятно, это скан без текстового слоя; нужен OCR. AI API не вызывался."
+                )
+            stage = "ожидание API"
+            if progress:
+                safe_model = cfg.model if cfg.model in ("gpt-6-luna", "gpt-4o-mini") else "(модель из конфигурации)"
+                progress(
+                    f"{prefix}: запрос к AI (модель: {safe_model}, "
+                    f"сетевой тайм-аут: {API_TIMEOUT_SECONDS} с)."
+                )
+            request_started = time.monotonic()
+            suggestion = request_suggestion(cfg, path.name, excerpt)
+            if progress:
+                progress(f"{prefix}: ответ AI за {time.monotonic() - request_started:.1f} с, проверка даты.")
+            stage = "проверка ответа и даты"
+            day = _verified_date(suggestion.get("date"), suggestion.get("evidence"), path.name + "\n" + excerpt)
+            title = _safe_title(suggestion.get("title"))
+        except (OSError, ValueError) as exc:
+            if progress:
+                # No filename, exception text, document excerpt, or secret in the log.
+                code = re.search(r"HTTP (\d{3})", str(exc))
+                status = f", HTTP {code.group(1)}" if code else ""
+                progress(f"{prefix}: ОШИБКА на этапе «{stage}»{status}. Планирование остановлено.")
+            raise
         base = f"{day}-{title}"
         target = path.with_name(f"{base}{path.suffix.lower()}")
         counter = 2
@@ -225,6 +303,8 @@ def plan_renames(paths: list[Path], input_dir: Path, env_file: Path) -> dict[Pat
             counter += 1
         occupied.add(str(target).casefold())
         planned[path] = target
+        if progress:
+            progress(f"{prefix}: дата подтверждена, имя запланировано. Файл ещё не изменён.")
     return planned
 
 

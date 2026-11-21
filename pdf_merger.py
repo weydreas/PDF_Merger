@@ -121,21 +121,41 @@ def process(
     name_overrides: dict[Path, str] = {}
     renamed = 0
     if rename_with_ai:
-        from ai_renamer import apply_renames, plan_renames
+        from ai_renamer import AIProgressLog, apply_renames, plan_renames
 
         _, needs_renaming = discover_groups(input_dir, output_dir, recursive=recursive)
         if needs_renaming:
             # No external requests unless the user explicitly selects AI mode.
             # Finish every API request and validate every proposed date first.
-            planned = plan_renames(needs_renaming, input_dir, env_file or ROOT / ".env")
+            progress = AIProgressLog(ROOT / "logs" / "ai-progress.log")
+            progress(
+                f"Начало: {len(needs_renaming)} PDF. Чтение и AI-запросы выполняются "
+                "по очереди; до подтверждения всех дат имена не меняются."
+            )
+            try:
+                planned = plan_renames(
+                    needs_renaming, input_dir, env_file or ROOT / ".env",
+                    progress=progress,
+                )
+            except (OSError, ValueError):
+                progress("Проверка остановлена: планирование не завершено, исходные имена сохранены.")
+                raise
+            progress(f"Все {len(planned)} предложений получены и проверены.")
             for original, proposed in planned.items():
                 action = "ПЛАН AI" if dry_run else "AI-ПЕРЕИМЕНОВАНИЕ"
                 print(f"{action}: {original.relative_to(input_dir)} -> {proposed.relative_to(input_dir)}")
             if dry_run:
+                progress("Режим проверки: файловая система не менялась.")
                 name_overrides = {old: new.name for old, new in planned.items()}
             else:
-                apply_renames(planned)
+                progress(f"Начало изменения имён {len(planned)} файлов в input.")
+                try:
+                    apply_renames(planned)
+                except (OSError, ValueError):
+                    progress("ОШИБКА файловой операции. Проверьте input: часть имён могла измениться.")
+                    raise
                 renamed = len(planned)
+                progress(f"Переименование завершено: {renamed} файлов. Переход к объединению.")
 
     groups, ignored = discover_groups(input_dir, output_dir, recursive=recursive, name_overrides=name_overrides)
     result = Result(files_ignored=len(ignored), groups_planned=len(groups), files_renamed=renamed)

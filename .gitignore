@@ -13,3 +13,6 @@ __pycache__/
 .env
 .env.*
 !.env.example
+
+# Local AI diagnostic progress (no secrets or PDF excerpts).
+/logs/
