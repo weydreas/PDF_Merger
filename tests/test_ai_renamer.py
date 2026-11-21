@@ -50,10 +50,10 @@ class AIRenameTests(unittest.TestCase):
             result = process(self.input, self.output, rename_with_ai=True, env_file=self.env)
         self.assertEqual(result.files_renamed, 1)
         self.assertEqual(result.groups_written, 1)
-        new = self.input / '2026-05-19-Биохимия.pdf'
+        new = self.input / '2026-05-19-Требует-проверки.pdf'
         self.assertFalse(src.exists())
         self.assertEqual(new.read_bytes(), original)
-        self.assertEqual(self.output.joinpath('2026-05-19.pdf').read_bytes(), original)
+        self.assertEqual((self.output / 'На_проверку' / '2026-05-19-Требует-проверки.pdf').read_bytes(), original)
         api.assert_called_once()
 
     def test_clean_names_never_need_key_or_api(self):
@@ -271,8 +271,42 @@ class AIRenameTests(unittest.TestCase):
         self.assertIn('тайм-аут', str(err.exception))
         self.assertNotIn('secret', str(err.exception))
 
+    def test_ai_cannot_mislabel_radiography_as_tests(self):
+        src = self.input / 'scan.pdf'
+        make_pdf(src)
+        with patch(
+            'ai_renamer.extract_excerpt',
+            return_value='Рентгенография органов грудной клетки. Дата 19.05.2026.',
+        ), patch(
+            'ai_renamer.request_suggestion',
+            return_value=self.suggestion(title='Tests'),
+        ):
+            planned = plan_renames([src], self.input, self.env)
+        self.assertEqual(
+            next(iter(planned.values())).name,
+            '2026-05-19-Рентгенография-грудной-клетки.pdf',
+        )
+        self.assertTrue(src.exists())
+
+    def test_unclassifiable_ai_title_never_enters_lab_bundle(self):
+        src = self.input / 'scan.pdf'
+        make_pdf(src)
+        with patch(
+            'ai_renamer.extract_excerpt',
+            return_value='Дата 19.05.2026. Других данных нет.',
+        ), patch(
+            'ai_renamer.request_suggestion',
+            return_value=self.suggestion(title='Лабораторные исследования'),
+        ):
+            planned = plan_renames([src], self.input, self.env)
+        self.assertEqual(
+            next(iter(planned.values())).name,
+            '2026-05-19-Требует-проверки.pdf',
+        )
+        self.assertTrue(src.exists())
+
     def test_collision_creates_unique_suffix_never_overwrites(self):
-        existing = self.input / '2026-05-19-Биохимия.pdf'
+        existing = self.input / '2026-05-19-Требует-проверки.pdf'
         src1 = self.input / 'a.pdf'
         src2 = self.input / 'b.pdf'
         for f in (existing, src1, src2):
@@ -280,7 +314,7 @@ class AIRenameTests(unittest.TestCase):
         with patch('ai_renamer.extract_excerpt', return_value='19.05.2026'), \
              patch('ai_renamer.request_suggestion', return_value=self.suggestion()):
             planned = plan_renames([src1, src2], self.input, self.env)
-        self.assertEqual([p.name for p in planned.values()], ['2026-05-19-Биохимия-02.pdf', '2026-05-19-Биохимия-03.pdf'])
+        self.assertEqual([p.name for p in planned.values()], ['2026-05-19-Требует-проверки-02.pdf', '2026-05-19-Требует-проверки-03.pdf'])
         apply_renames(planned)
         self.assertTrue(existing.exists())
         self.assertTrue(all(p.exists() for p in planned.values()))
