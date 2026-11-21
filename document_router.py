@@ -62,8 +62,10 @@ REGION_REGEXES = tuple((label, re.compile(pattern, re.IGNORECASE)) for label, pa
 # Hospital LIS exports use the generic field "Дата назначения лабораторного
 # исследования" even for ECG and X-ray. The performed procedure is the
 # CODE - PROCEDURE. Врач: ... row; use THAT rather than incidental text.
+# Numeric procedure codes in this exporter are 6+ digits. Short numeric
+# ranges such as '110.0 - 160.0' are reference values, NOT procedures.
 PROCEDURE_ROW = re.compile(
-    r"(?m)^[ \t]*((?:[A-Za-zА-Яа-я]\d{2,}|\d{3,})(?:\.\d+){0,4})[ \t]*-[ \t]*"
+    r"(?m)^[ \t]*((?:[A-Za-zА-Яа-я]\d{2,}|\d{6,})(?:\.\d+){0,4})[ \t]*-[ \t]*"
     r"(.+?)(?:[ \t]+Врач\s*:|$)",
     re.IGNORECASE,
 )
