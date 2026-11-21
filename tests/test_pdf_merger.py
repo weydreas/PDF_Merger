@@ -132,7 +132,7 @@ class MergerTests(unittest.TestCase):
         for path, width in ((lab1, 111), (lab2, 222), (xray, 333)):
             make_pdf(path, [width])
         def classification(path, effective_name=None):
-            if path == xray:
+            if path.name == xray.name:
                 return DocumentClass("study", "Рентгенография грудной клетки", "verified text")
             return DocumentClass("lab", "Анализы", "verified lab markers")
         with patch("pdf_merger.classify_document", side_effect=classification):
@@ -171,7 +171,7 @@ class MergerTests(unittest.TestCase):
         make_pdf(unknown, [501])
         make_pdf(lab, [502])
         def classifier(path, effective_name=None):
-            if path == unknown:
+            if path.name == unknown.name:
                 return DocumentClass("review", "Требует-проверки", "uncertain")
             return DocumentClass("lab", "ОАК", "evidenced")
         with patch("pdf_merger.classify_document", side_effect=classifier):
