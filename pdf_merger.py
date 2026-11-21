@@ -15,6 +15,8 @@ import tempfile
 
 from pypdf import PdfReader, PdfWriter
 
+from document_router import classify_document
+
 
 ROOT = Path(__file__).resolve().parent
 DATE_PREFIX = re.compile(r"^(\d{4}-\d{2}-\d{2})-(.+)$")
@@ -63,6 +65,43 @@ def discover_groups(
         return relative.casefold(), relative
 
     return {key_date: sorted(paths, key=key) for key_date, paths in sorted(grouped.items())}, sorted(ignored, key=key)
+
+
+def plan_outputs(
+    groups: dict[str, list[Path]], input_dir: Path, output_dir: Path,
+    name_overrides: dict[Path, str] | None = None,
+) -> list[tuple[Path, list[Path], str]]:
+    """Lab results merge only with lab results for the same day.
+
+    Each examination is its own PDF. Uncertain documents remain separate in
+    На_проверку, never silently mixed with daily lab bundles.
+    """
+    labs: dict[str, list[Path]] = defaultdict(list)
+    individual: list[tuple[str, Path, str, str]] = []
+    for day, paths in groups.items():
+        for path in paths:
+            classification = classify_document(
+                path, effective_name=(name_overrides or {}).get(path, path.name)
+            )
+            if classification.category == "lab":
+                labs[day].append(path)
+            elif classification.category == "study":
+                individual.append((day, path, "Обследования", classification.title))
+            else:
+                individual.append((day, path, "На_проверку", "Требует-проверки"))
+
+    plans: list[tuple[Path, list[Path], str]] = []
+    for day, paths in sorted(labs.items()):
+        plans.append((output_dir / "Анализы" / f"{day}-Анализы.pdf", paths, "Анализы"))
+
+    collisions: dict[tuple[str, str, str], int] = defaultdict(int)
+    for day, path, folder, title in individual:
+        key = (folder, day, title.casefold())
+        collisions[key] += 1
+        suffix = f"-{collisions[key]:02d}" if collisions[key] > 1 else ""
+        target = output_dir / folder / f"{day}-{title}{suffix}.pdf"
+        plans.append((target, [path], folder))
+    return plans
 
 
 def _write_atomic(paths: list[Path], target: Path, overwrite: bool) -> None:
@@ -158,19 +197,24 @@ def process(
                 progress(f"Переименование завершено: {renamed} файлов. Переход к объединению.")
 
     groups, ignored = discover_groups(input_dir, output_dir, recursive=recursive, name_overrides=name_overrides)
-    result = Result(files_ignored=len(ignored), groups_planned=len(groups), files_renamed=renamed)
+    plans = plan_outputs(groups, input_dir, output_dir, name_overrides=name_overrides)
+    result = Result(files_ignored=len(ignored), groups_planned=len(plans), files_renamed=renamed)
     for path in ignored:
         print(f"ПРОПУЩЕН (нет корректной даты YYYY-MM-DD-): {path.relative_to(input_dir)}")
-    if not groups:
-        print("Не найдено PDF с корректным префиксом YYYY-MM-DD-.")
+    if not plans:
+        print("Не найдено документов с корректной датой для обработки.")
         return result
 
-    if not dry_run:
-        output_dir.mkdir(parents=True, exist_ok=True)
+    # Legacy mixed outputs in the root are preserved, never read as source or
+    # treated as proof that new structured outputs were already produced.
+    if output_dir.is_dir() and any(
+        re.fullmatch(r"\\d{4}-\\d{2}-\\d{2}\\.pdf", p.name) for p in output_dir.iterdir() if p.is_file()
+    ):
+        print("ВНИМАНИЕ: старые объединённые PDF в корне output сохранены без изменений.")
+        print("Новые раздельные результаты будут записаны в подпапки Анализы, Обследования, На_проверку.")
 
-    for day, paths in groups.items():
-        target = output_dir / f"{day}.pdf"
-        print(f"\n{day}: {len(paths)} исходных PDF -> {target.name}")
+    for target, paths, category in plans:
+        print(f"\\n{category}: {len(paths)} PDF -> {target.relative_to(output_dir)}")
         for index, source in enumerate(paths, start=1):
             print(f"  {index}. {source.relative_to(input_dir)}")
         if target.exists() and not overwrite:
@@ -181,6 +225,7 @@ def process(
             print("  ПРОВЕРКА: файлы не записываются")
             continue
         try:
+            target.parent.mkdir(parents=True, exist_ok=True)
             _write_atomic(paths, target, overwrite=overwrite)
         except FileExistsError:
             print("  ПРОПУЩЕНО: результат уже создан другим процессом")
