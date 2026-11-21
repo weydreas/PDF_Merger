@@ -102,9 +102,10 @@ def classify_text(filename: str, excerpt: str) -> DocumentClass:
     # No extractable text: only very specific names justify classification.
     if len(set(name_studies)) == 1 and not name_lab:
         return DocumentClass("study", name_studies[0], "явный тип обследования в имени")
-    if len(set(name_lab)) == 1 and not name_studies:
-        return DocumentClass("lab", name_lab[0], "явный тип анализа в имени")
-    return DocumentClass("review", "Требует-проверки", "недостаточно достоверных признаков")
+    # An AI-generated filename is not medical evidence. In particular, a
+    # wrongly labelled "Биохимия" PDF without extractable text must NEVER
+    # enter a lab bundle based on its name alone.
+    return DocumentClass("review", "Требует-проверки", "нет лабораторных признаков в содержимом PDF")
 
 
 def classify_document(path: Path, effective_name: str | None = None) -> DocumentClass:
