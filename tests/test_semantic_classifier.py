@@ -100,6 +100,33 @@ class SemanticClassifierTests(unittest.TestCase):
                 )
                 self.assertEqual(result.category, "review")
 
+    def test_model_cannot_label_an_exam_as_lab_when_local_is_uncertain(self):
+        excerpt = "7002892 - Рентгенография грудной клетки. Врач: Т.Т."
+        claim = {
+            "category": "lab", "title": "Анализы",
+            "evidence": "7002892 - Рентгенография грудной клетки.",
+        }
+        result = _sanitize_classification(
+            claim, excerpt,
+            DocumentClass("review", "Требует-проверки", "unknown"),
+        )
+        self.assertEqual(result.category, "review")
+
+    def test_only_recommended_ultrasound_is_not_accepted_as_performed(self):
+        excerpt = (
+            "Заключение. Рекомендовано УЗИ плевральных полостей. "
+            "При ухудшении состояния обратиться к врачу."
+        )
+        claim = {
+            "category": "study", "title": "УЗИ плевральных полостей",
+            "evidence": "УЗИ плевральных полостей",
+        }
+        result = _sanitize_classification(
+            claim, excerpt,
+            DocumentClass("review", "Требует-проверки", "unknown"),
+        )
+        self.assertEqual(result.category, "review")
+
     def test_structural_mixed_procedures_are_not_trusted_from_ai(self):
         excerpt = (
             "7002892 - Рентгенография грудной клетки. Врач: Т.Т.\n"
