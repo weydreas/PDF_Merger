@@ -33,8 +33,11 @@ class MergerTests(unittest.TestCase):
         self.input.mkdir()
 
     def run_process(self, **kwargs):
-        with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
-            return process(self.input, self.output, **kwargs)
+        out, err = StringIO(), StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            result = process(self.input, self.output, **kwargs)
+        self.last_run_output = out.getvalue() + "\n" + err.getvalue()
+        return result
 
     def run_as_labs(self, **kwargs):
         with patch(
@@ -134,7 +137,7 @@ class MergerTests(unittest.TestCase):
             return DocumentClass("lab", "Анализы", "verified lab markers")
         with patch("pdf_merger.classify_document", side_effect=classification):
             result = self.run_process()
-        self.assertEqual(result.groups_written, 2)
+        self.assertEqual(result.groups_written, 2, self.last_run_output)
         labs = self.output / "Анализы" / "2026-05-19-Анализы.pdf"
         imaging = self.output / "Обследования" / "2026-05-19-Рентгенография грудной клетки.pdf"
         self.assertEqual([int(x.mediabox.width) for x in PdfReader(labs).pages], [111, 222])
@@ -173,7 +176,7 @@ class MergerTests(unittest.TestCase):
             return DocumentClass("lab", "ОАК", "evidenced")
         with patch("pdf_merger.classify_document", side_effect=classifier):
             r = self.run_process()
-        self.assertEqual(r.groups_written, 2)
+        self.assertEqual(r.groups_written, 2, self.last_run_output)
         self.assertEqual(
             (self.output / "На_проверку" / "2026-05-19-Требует-проверки.pdf").read_bytes(),
             unknown.read_bytes(),
