@@ -63,7 +63,7 @@ REGION_REGEXES = tuple((label, re.compile(pattern, re.IGNORECASE)) for label, pa
 # исследования" even for ECG and X-ray. The performed procedure is the
 # CODE - PROCEDURE. Врач: ... row; use THAT rather than incidental text.
 PROCEDURE_ROW = re.compile(
-    r"(?m)^[ \t]*([A-Za-zА-Яа-я]?\d{3,}(?:\.\d+){0,4})[ \t]*-[ \t]*"
+    r"(?m)^[ \t]*((?:[A-Za-zА-Яа-я]\d{2,}|\d{3,})(?:\.\d+){0,4})[ \t]*-[ \t]*"
     r"(.+?)(?:[ \t]+Врач\s*:|$)",
     re.IGNORECASE,
 )
