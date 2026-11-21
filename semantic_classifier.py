@@ -23,7 +23,7 @@ from ai_renamer import (
     AIConfig, API_TIMEOUT_SECONDS, MAX_RESPONSE_BYTES, RenameError,
     _NoRedirect, _api_status_hint, extract_excerpt, load_config,
 )
-from document_router import DocumentClass, classify_text
+from document_router import DocumentClass, STUDY_REGEXES, classify_text
 
 
 PROMPT_VERSION = 1
@@ -128,6 +128,18 @@ def _sanitize_classification(answer: object, sent_excerpt: str,
                              "лабораторный характер подтверждён семантикой и цитатой")
     if not STUDY_TITLE.fullmatch(title.strip()) or len(title) > 75:
         return review
+    # The proposed modality must be literally identifiable in the cited
+    # procedure text; a free-form "CT patient ..." title is not evidence.
+    modality = title.split(" ", 1)[0]
+    detector = next(
+        (regex for label, regex in STUDY_REGEXES if label == modality), None
+    )
+    if detector is None or not detector.search(evidence):
+        return review
+    if " " in title:
+        anatomy = title.split(" ", 1)[1].casefold()
+        if anatomy not in evidence.casefold():
+            return review
     return DocumentClass("study", title.strip(),
                          "выполненное обследование подтверждено семантикой и цитатой")
 
