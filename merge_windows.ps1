@@ -184,16 +184,24 @@ function Invoke-InteractiveMerger {
     Write-Host ("Обнаружено PDF-файлов: {0}" -f $pdfs.Count) -ForegroundColor Green
     Write-Host ''
     Write-Host 'Запустить проверку и объединение?'
-    Write-Host '  [1] Да, запустить проверку' -ForegroundColor Green
+    Write-Host '  [1] Локально, без AI и внешних запросов' -ForegroundColor Green
+    Write-Host '  [2] Семантика Luna только для непонятных PDF (меньше запросов)'
+    Write-Host '  [3] Семантика Luna для всех PDF (первый раз может быть платным)'
     Write-Host '  [0] Нет, выйти'
+    Write-Host 'Для [2] и [3] во внешний API передаётся текст из PDF (до 8500 символов).' -ForegroundColor Yellow
+    Write-Host 'Текст может включать конфиденциальные медицинские сведения.' -ForegroundColor Yellow
+    Write-Host 'Результаты семантической проверки кэшируются локально по содержимому PDF.'
+    $aiClassification = $null
     do {
-        $choice = (Read-Host 'Выберите действие [1/0]').Trim().ToLowerInvariant()
+        $choice = (Read-Host 'Выберите действие [1/2/3/0]').Trim().ToLowerInvariant()
         if ($choice -in @('0', 'нет', 'н', 'n', 'no')) {
             Write-Host 'Отменено. Файлы не изменены.'
             return 0
         }
         if ($choice -in @('1', 'да', 'д', 'y', 'yes')) { break }
-        Write-Host 'Введите 1 (Да) или 0 (Нет).' -ForegroundColor Yellow
+        if ($choice -eq '2') { $aiClassification = 'review'; break }
+        if ($choice -eq '3') { $aiClassification = 'all'; break }
+        Write-Host 'Введите 1 (локально), 2 (только спорные), 3 (все) или 0.' -ForegroundColor Yellow
     } while ($true)
 
     Write-Host ''
@@ -264,6 +272,10 @@ function Invoke-InteractiveMerger {
     $mergeArgs = @()
     if ($useAI) { $mergeArgs += '--rename-with-ai' }
     if ($replaceExisting) { $mergeArgs += '--overwrite' }
+    if ($null -ne $aiClassification) {
+        $mergeArgs += @('--classify-with-ai', $aiClassification)
+        Write-Host ('AI-семантика: режим {0}, проверяется подтверждение выполненных процедур.' -f $aiClassification) -ForegroundColor Cyan
+    }
     if ($useAI) {
         Write-Host 'AI: запускается проверка документов, прогресс будет отображаться ниже.' -ForegroundColor Cyan
         Write-Host 'Диагностика без имён файлов и ключей: logs\ai-progress.log'
