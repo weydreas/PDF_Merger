@@ -209,7 +209,7 @@ class SemanticClassifierTests(unittest.TestCase):
         excerpt_lab = "B03.016.002 - Общий анализ крови. Врач: Т.Т."
         excerpt_study = "7002892 - Рентгенография грудной клетки. Врач: Т.Т."
         def extract(path):
-            return excerpt_lab if path == self.first else excerpt_study
+            return excerpt_lab if path.name == self.first.name else excerpt_study
         def ai(cfg, excerpt):
             if "Общий анализ" in excerpt:
                 return {"category": "lab", "title": "Анализы",
@@ -238,7 +238,7 @@ class SemanticClassifierTests(unittest.TestCase):
         with patch("pdf_merger.ROOT", self.root), patch("pdf_merger.classify_document",
                    side_effect=lambda path, effective_name=None:
                    DocumentClass("review", "Требует-проверки", "unknown")
-                   if path == self.first else
+                   if path.name == self.first.name else
                    DocumentClass("study", "ЭКГ", "known")), \
              patch("semantic_classifier.extract_excerpt",
                    return_value="B03.016.002 - Общий анализ крови. Врач: Т.Т."), \
