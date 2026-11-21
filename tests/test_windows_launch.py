@@ -132,12 +132,20 @@ class WindowsConsoleFlowTests(unittest.TestCase):
 
         approved = self.invoke_ps('1\n')
         self.assertEqual(approved.returncode, 0, approved.stdout + approved.stderr)
-        merged = self.root / 'output' / '2026-03-02.pdf'
-        self.assertTrue(merged.exists())
-        self.assertEqual([int(page.mediabox.width) for page in PdfReader(merged).pages], [111, 222])
+        # Synthetic blank PDFs have no lab evidence: never mix them into a
+        # daily bundle on the strength of their filename alone.
+        folder = self.root / 'output' / 'На_проверку'
+        first = folder / '2026-03-02-Требует-проверки.pdf'
+        second = folder / '2026-03-02-Требует-проверки-02.pdf'
+        self.assertTrue(first.exists())
+        self.assertTrue(second.exists())
+        self.assertEqual([int(page.mediabox.width) for page in PdfReader(first).pages], [111])
+        self.assertEqual([int(page.mediabox.width) for page in PdfReader(second).pages], [222])
+        self.assertFalse((self.root / 'output' / '2026-03-02.pdf').exists())
         again = self.invoke_ps('1\n')
         self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
-        self.assertEqual([int(page.mediabox.width) for page in PdfReader(merged).pages], [111, 222])
+        self.assertEqual([int(page.mediabox.width) for page in PdfReader(first).pages], [111])
+        self.assertEqual([int(page.mediabox.width) for page in PdfReader(second).pages], [222])
 
 
     def test_changed_requirements_trigger_install_prompt_before_processing(self):
