@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date
@@ -146,6 +147,50 @@ def _write_atomic(paths: list[Path], target: Path, overwrite: bool) -> None:
             temp_path.unlink(missing_ok=True)
 
 
+def _write_membership_report(
+    entries: list[tuple[Path, Path | None, str, str]],
+    input_dir: Path,
+    output_dir: Path,
+) -> Path:
+    """Write a local UTF-8 Excel-friendly audit; never claim skipped items merged.
+
+    A PLANNED source of an existing result is NOT evidence that it was included.
+    This report describes only the current run's confirmed contributions.
+    """
+    target = output_dir / "Состав_результатов.csv"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8-sig", newline="",
+            prefix=".membership-", suffix=".tmp", dir=output_dir,
+            delete=False,
+        ) as stream:
+            temporary = Path(stream.name)
+            writer = csv.writer(stream, delimiter=";")
+            writer.writerow([
+                "Исходный PDF", "Категория", "Итоговый файл",
+                "Статус операции", "Подтверждено включение",
+            ])
+            for source, destination, category, status in entries:
+                included = (
+                    "ДА" if status == "СОЗДАНО"
+                    else "НЕТ" if status == "НЕКОРРЕКТНАЯ_ДАТА"
+                    else "НЕ ПОДТВЕРЖДЕНО"
+                )
+                writer.writerow([
+                    str(source.relative_to(input_dir)), category,
+                    str(destination.relative_to(output_dir)) if destination else "",
+                    status, included,
+                ])
+        os.replace(temporary, target)
+        temporary = None
+        return target
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 def process(
     input_dir: Path, output_dir: Path, *, overwrite: bool = False,
     dry_run: bool = False, recursive: bool = False,
@@ -219,6 +264,10 @@ def process(
         files_ignored=len(ignored), groups_planned=len(plans),
         files_renamed=renamed, ai_unresolved=len(unresolved),
     )
+    report_entries: list[tuple[Path, Path | None, str, str]] = [
+        (path, None, "Не обработано", "НЕКОРРЕКТНАЯ_ДАТА")
+        for path in ignored
+    ]
     for path in ignored:
         print(f"ПРОПУЩЕН (нет корректной даты YYYY-MM-DD-): {path.relative_to(input_dir)}")
     if unresolved and not dry_run:
@@ -249,7 +298,15 @@ def process(
         for index, source in enumerate(paths, start=1):
             print(f"  {index}. {source.relative_to(input_dir)}")
         if target.exists() and not overwrite:
-            print("  ПРОПУЩЕНО: результат уже существует (для замены нужен --overwrite)")
+            print(
+                "  ПРОПУЩЕНО: результат уже существует и НЕ ОБНОВЛЁН. "
+                "Перечисленные выше PDF — только план; они НЕ обязательно входят "
+                "в существующий файл. Для пересборки нужен --overwrite."
+            )
+            report_entries.extend(
+                (source, target, category, "ПРОПУЩЕНО_УЖЕ_СУЩЕСТВУЕТ")
+                for source in paths
+            )
             result.groups_skipped += 1
             continue
         if dry_run:
@@ -260,13 +317,48 @@ def process(
             _write_atomic(paths, target, overwrite=overwrite)
         except FileExistsError:
             print("  ПРОПУЩЕНО: результат уже создан другим процессом")
+            report_entries.extend(
+                (source, target, category, "ПРОПУЩЕНО_УЖЕ_СУЩЕСТВУЕТ")
+                for source in paths
+            )
             result.groups_skipped += 1
         except Exception as exc:
             print(f"  ОШИБКА: {type(exc).__name__}: {exc}", file=sys.stderr)
+            report_entries.extend(
+                (source, target, category, "ОШИБКА")
+                for source in paths
+            )
             result.groups_failed += 1
         else:
             print("  СОЗДАНО")
+            report_entries.extend(
+                (source, target, category, "СОЗДАНО")
+                for source in paths
+            )
             result.groups_written += 1
+
+    if not dry_run:
+        try:
+            report_path = _write_membership_report(
+                report_entries, input_dir, output_dir
+            )
+        except OSError as exc:
+            # A nonessential CSV export cannot interrupt PDF creation.
+            print(
+                f"ПРЕДУПРЕЖДЕНИЕ: отчёт о составе не записан: {type(exc).__name__}",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"\nПРОВЕРКА СОСТАВА: {report_path.relative_to(output_dir)}. "
+                "Включение подтверждено ТОЛЬКО для строк со статусом СОЗДАНО."
+            )
+    if result.groups_skipped:
+        print(
+            "ВНИМАНИЕ: существующие результаты не обновлены. "
+            "Их состав НЕ проверен по новому плану — используйте --overwrite "
+            "после проверки исходных файлов."
+        )
 
     print(
         f"\nИтог: {result.groups_written} создано; {result.groups_skipped} пропущено; "
