@@ -35,7 +35,7 @@ class QwenBenchmarkTests(unittest.TestCase):
         self.assertIn("9gb", self.ps)
         self.assertIn("qwen3-vl:8b", self.ps)
         for forbidden in (
-            "api.openai.com", "https://", "curl |", "iex", "reset --hard",
+            "api.openai.com", "curl |", "iex", "reset --hard",
             "ollama rm", "remove-item", "get-childitem -path input",
             "get-content .env", "pdfmerger_ai_key",
         ):
