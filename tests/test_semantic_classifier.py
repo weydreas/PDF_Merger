@@ -132,6 +132,62 @@ class SemanticClassifierTests(unittest.TestCase):
         self.assertEqual(first[self.first].category, "review")
         self.assertEqual(second[self.first].category, "lab")
 
+    def test_reference_filter_keeps_studies_and_originals_byte_identical(self):
+        from pypdf import PdfReader
+        for path in (self.first, self.second):
+            writer = PdfWriter()
+            for width in (111, 222, 333):
+                writer.add_blank_page(width=width, height=100)
+            with path.open("wb") as handle:
+                writer.write(handle)
+            writer.close()
+        originals = {path: path.read_bytes() for path in (self.first, self.second)}
+        decisions = {
+            self.first: DocumentClass("lab", "Анализы", "AI"),
+            self.second: DocumentClass("study", "Ангиоскан", "AI"),
+        }
+        with patch("pdf_merger.ROOT", self.root), patch(
+            "semantic_classifier.classify_documents_with_ai", return_value=decisions
+        ), patch("semantic_classifier.select_lab_pages", return_value=(0, 2)) as filter_pages, redirect_stdout(StringIO()):
+            result = process(self.input, self.output, ai_classification="all", env_file=self.env,
+                             filter_lab_reference_pages=True)
+        self.assertEqual(result.groups_written, 2)
+        filter_pages.assert_called_once()
+        self.assertEqual(filter_pages.call_args.args[0], self.first)
+        self.assertEqual([int(p.mediabox.width) for p in PdfReader(self.output / "Анализы" / "2026.11.18-Анализы.pdf").pages], [111, 333])
+        self.assertEqual((self.output / "Обследования" / "2026.11.18-Ангиоскан.pdf").read_bytes(), originals[self.second])
+        for path, data in originals.items():
+            self.assertEqual(path.read_bytes(), data)
+
+    def test_page_filter_keeps_unrecognized_pages_and_requires_result(self):
+        from semantic_classifier import select_lab_pages
+        from ai_renamer import load_config
+        from unittest.mock import MagicMock
+        pages = []
+        for content in ("Глюкоза 5.2", "Общая справка", "Клинический комментарий"):
+            page = MagicMock()
+            page.extract_text.return_value = content
+            page.images = []
+            pages.append(page)
+        reader = MagicMock()
+        reader.pages = pages
+        reader.is_encrypted = False
+        cfg = load_config(self.env)
+        with patch("pypdf.PdfReader", return_value=reader), patch(
+            "semantic_classifier.request_classification",
+            side_effect=[{"category": "result"}, {"category": "reference_only"}, {"category": "retain"}]
+        ):
+            self.assertEqual(select_lab_pages(self.first, cfg), (0, 2))
+        with patch("pypdf.PdfReader", return_value=reader), patch(
+            "semantic_classifier.request_classification",
+            return_value={"category": "reference_only"}
+        ):
+            self.assertIsNone(select_lab_pages(self.first, cfg))
+
+    def test_page_filter_requires_explicit_ai_consent(self):
+        with self.assertRaises(ValueError):
+            process(self.input, self.output, filter_lab_reference_pages=True)
+
     def test_pii_header_can_be_trimmed_from_lis_export(self):
         doc = (
             "ФИО пациента: Скрыто Имя\nАдрес: скрыто\n"
