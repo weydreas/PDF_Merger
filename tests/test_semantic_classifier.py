@@ -41,8 +41,8 @@ class SemanticClassifierTests(unittest.TestCase):
             encoding="utf-8",
         )
         self.cache = self.root / "logs" / "ai-classification-cache.json"
-        self.first = self.input / "2026-11-18-Требует-проверки.pdf"
-        self.second = self.input / "2026-11-18-Требует-проверки-02.pdf"
+        self.first = self.input / "2026.11.18-Требует-проверки.pdf"
+        self.second = self.input / "2026.11.18-Требует-проверки-02.pdf"
         make_pdf(self.first, width=151)
         make_pdf(self.second, width=252)
 
@@ -215,11 +215,11 @@ class SemanticClassifierTests(unittest.TestCase):
         self.assertEqual(result.groups_written, 2)
         self.assertEqual(api.call_count, 2)
         self.assertEqual(
-            (self.output / "Анализы" / "2026-11-18-Анализы.pdf").read_bytes(),
+            (self.output / "Анализы" / "2026.11.18-Анализы.pdf").read_bytes(),
             self.first.read_bytes(),
         )
         self.assertEqual(
-            (self.output / "Обследования" / "2026-11-18-Рентгенография грудной клетки.pdf").read_bytes(),
+            (self.output / "Обследования" / "2026.11.18-Рентгенография грудной клетки.pdf").read_bytes(),
             self.second.read_bytes(),
         )
         self.assertFalse((self.output / "На_проверку").exists())
@@ -240,7 +240,7 @@ class SemanticClassifierTests(unittest.TestCase):
                              ai_classification="review", env_file=self.env)
         self.assertEqual(api.call_count, 1)
         self.assertEqual(result.groups_written, 2)
-        self.assertTrue((self.output / "Анализы" / "2026-11-18-Анализы.pdf").exists())
+        self.assertTrue((self.output / "Анализы" / "2026.11.18-Анализы.pdf").exists())
 
 
 if __name__ == "__main__":
