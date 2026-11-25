@@ -400,6 +400,20 @@ class MergerTests(unittest.TestCase):
             second.read_bytes(),
         )
 
+    def test_literal_suffix_in_ai_title_never_overwrites_another_study(self):
+        names = ["2026-05-19-1.pdf", "2026-05-19-2.pdf", "2026-05-19-3.pdf"]
+        for name, width in zip(names, (111, 222, 333)):
+            make_pdf(self.input / name, [width])
+        titles = dict(zip(names, ("УЗИ", "УЗИ", "УЗИ-02")))
+        def categorize(path, effective_name=None):
+            return DocumentClass("study", titles[path.name], "AI")
+        with patch("pdf_merger.classify_document", side_effect=categorize):
+            result = self.run_process(overwrite=True)
+        self.assertEqual(result.groups_written, 3, self.last_run_output)
+        outputs = list((self.output / "Обследования").glob("*.pdf"))
+        self.assertEqual(len(outputs), 3)
+        self.assertEqual(sorted(int(PdfReader(p).pages[0].mediabox.width) for p in outputs), [111, 222, 333])
+
     def test_unclassified_docs_are_not_merged_into_labs(self):
         unknown = self.input / "2026-05-19-Тест.pdf"
         lab = self.input / "2026-05-19-ОАК.pdf"
