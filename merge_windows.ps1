@@ -216,8 +216,9 @@ function Invoke-InteractiveMerger {
     Write-Host '  [2] AI-семантика только для непонятных PDF (меньше запросов)'
     Write-Host '  [3] AI-семантика для всех PDF (первый раз может быть платным)'
     Write-Host '  [0] Нет, выйти'
-    Write-Host 'Для [2] и [3] во внешний API передаётся текст из PDF (до 8500 символов).' -ForegroundColor Yellow
+    Write-Host 'Для [2] и [3] во внешний API передаётся текст из PDF (до 8500 символов за запрос).' -ForegroundColor Yellow
     Write-Host 'Текст может включать конфиденциальные медицинские сведения.' -ForegroundColor Yellow
+    Write-Host 'Для подтверждённых AI анализов можно дополнительно проверить отдельные страницы и исключить только общие справочные страницы.'
     Write-Host 'Результаты семантической проверки кэшируются локально по содержимому PDF.'
     $aiClassification = $null
     do {
@@ -232,6 +233,12 @@ function Invoke-InteractiveMerger {
         Write-Host 'Введите 1 (локально), 2 (только спорные), 3 (все) или 0.' -ForegroundColor Yellow
     } while ($true)
 
+    $filterReferences = $false
+    if ($null -ne $aiClassification) {
+        Write-Host 'Удалять из выходных копий анализов только общие справочные страницы? Для этого текст отдельных страниц будет отправлен в AI API; обследования и оригиналы не изменяются.' -ForegroundColor Yellow
+        $filterChoice = (Read-Host '1 — да; Enter или 0 — сохранить все страницы').Trim()
+        $filterReferences = $filterChoice -eq '1'
+    }
     Write-Host ''
     Write-Host 'Проверка имён PDF и объединение по дате...' -ForegroundColor Cyan
     & $python $MergeProgram --input-dir $InputDir --output-dir $OutputDir --check-names | Out-Host
@@ -243,12 +250,12 @@ function Invoke-InteractiveMerger {
     $useAI = $false
     if ($checkCode -eq 3) {
         Write-Host ''
-        Write-Host 'Найдены PDF без корректного префикса YYYY-MM-DD-.' -ForegroundColor Yellow
-        Write-Host 'AI может определить дату и переименовать эти файлы перед объединением.'
+        Write-Host 'Найдены PDF без корректного префикса YYYY-MM-DD- или YYYY.MM.DD-.' -ForegroundColor Yellow
+        Write-Host 'AI может определить дату для выходных файлов, не меняя оригиналы.'
         Write-Host 'ВНИМАНИЕ: для AI будут отправлены имя файла и текст первых двух страниц' -ForegroundColor Yellow
         Write-Host '(не более 10000 символов) во внешний API. PDF целиком не передаётся.' -ForegroundColor Yellow
         Write-Host 'Это может включать конфиденциальную медицинскую информацию.'
-        Write-Host '  [1] Разрешить AI-переименование (нужен API ключ в .env)' -ForegroundColor Cyan
+        Write-Host '  [1] Разрешить AI-определение даты (нужен API ключ в .env)' -ForegroundColor Cyan
         Write-Host '  [2] Продолжить локально, пропустив файлы с неверными именами'
         Write-Host '  [0] Отмена'
         do {
@@ -302,6 +309,7 @@ function Invoke-InteractiveMerger {
     if ($replaceExisting) { $mergeArgs += '--overwrite' }
     if ($null -ne $aiClassification) {
         $mergeArgs += @('--classify-with-ai', $aiClassification)
+        if ($filterReferences) { $mergeArgs += '--filter-lab-reference-pages' }
         Write-Host ('AI-семантика: режим {0}, категорию переданных документов определяет модель.' -f $aiClassification) -ForegroundColor Cyan
     }
     if ($useAI) {
@@ -312,12 +320,8 @@ function Invoke-InteractiveMerger {
     $code = $LASTEXITCODE
     Write-Host ''
     if ($code -eq 0) {
-        Write-Host 'Готово. Результаты находятся в папке output.' -ForegroundColor Green
-        if ($useAI) {
-            Write-Host 'Содержимое PDF не изменено. Имена файлов с неверными датами могли быть исправлены.'
-        } else {
-            Write-Host 'Исходные PDF в input не изменены.'
-        }
+        Write-Host ('Готово. Результаты: {0}' -f $OutputDir) -ForegroundColor Green
+        Write-Host 'Исходные PDF в input не изменены. Имена и состав выходных файлов проверяйте в отчёте.'
     } else {
         Write-Host ("Обработка завершилась с ошибками (код {0}). Смотрите сообщения выше." -f $code) -ForegroundColor Red
     }
