@@ -20,7 +20,7 @@ from document_router import DocumentClass, classify_document
 
 
 ROOT = Path(__file__).resolve().parent
-DATE_PREFIX = re.compile(r"^(\d{4}-\d{2}-\d{2})-(.+)$")
+DATE_PREFIX = re.compile(r"^(\d{4})([-.])(\d{2})\2(\d{2})-(.+)$")
 
 
 @dataclass
@@ -30,7 +30,8 @@ class Result:
     groups_failed: int = 0
     files_ignored: int = 0
     groups_planned: int = 0
-    files_renamed: int = 0
+    files_renamed: int = 0  # legacy: input is never renamed
+    files_dated: int = 0
     ai_unresolved: int = 0
 
 
@@ -54,7 +55,7 @@ def discover_groups(
         if not match:
             ignored.append(path)
             continue
-        candidate = match.group(1)
+        candidate = f"{match.group(1)}-{match.group(3)}-{match.group(4)}"
         try:
             date.fromisoformat(candidate)
         except ValueError:
@@ -99,14 +100,14 @@ def plan_outputs(
 
     plans: list[tuple[Path, list[Path], str]] = []
     for day, paths in sorted(labs.items()):
-        plans.append((output_dir / "Анализы" / f"{day}-Анализы.pdf", paths, "Анализы"))
+        plans.append((output_dir / "Анализы" / f"{day.replace(chr(45), chr(46))}-Анализы.pdf", paths, "Анализы"))
 
     collisions: dict[tuple[str, str, str], int] = defaultdict(int)
     for day, path, folder, title in individual:
         key = (folder, day, title.casefold())
         collisions[key] += 1
         suffix = f"-{collisions[key]:02d}" if collisions[key] > 1 else ""
-        target = output_dir / folder / f"{day}-{title}{suffix}.pdf"
+        target = output_dir / folder / f"{day.replace(chr(45), chr(46))}-{title}{suffix}.pdf"
         plans.append((target, [path], folder))
     return plans
 
@@ -215,7 +216,7 @@ def process(
     renamed = 0
     unresolved = []
     if rename_with_ai:
-        from ai_renamer import AIProgressLog, apply_renames, plan_renames
+        from ai_renamer import AIProgressLog, plan_renames
 
         _, needs_renaming = discover_groups(input_dir, output_dir, recursive=recursive)
         if needs_renaming:
@@ -230,6 +231,7 @@ def process(
                 planned = plan_renames(
                     needs_renaming, input_dir, env_file or ROOT / ".env",
                     progress=progress, unresolved=unresolved,
+                    cache_file=None if dry_run else ROOT / 'logs' / 'ai-date-cache.json',
                 )
             except (OSError, ValueError):
                 progress("Проверка остановлена: планирование не завершено, исходные имена сохранены.")
@@ -248,23 +250,11 @@ def process(
                     flush=True,
                 )
             for original, proposed in planned.items():
-                action = "ПЛАН AI" if dry_run else "AI-ПЕРЕИМЕНОВАНИЕ"
+                action = "ПЛАН AI" if dry_run else "AI-ПЛАН ИМЕНИ"
                 print(f"{action}: {original.relative_to(input_dir)} -> {proposed.relative_to(input_dir)}")
-            if dry_run:
-                progress("Режим проверки: файловая система не менялась.")
-                name_overrides = {old: new.name for old, new in planned.items()}
-            else:
-                progress(f"Начало изменения имён {len(planned)} файлов в input.")
-                try:
-                    apply_renames(planned)
-                except (OSError, ValueError):
-                    progress("ОШИБКА файловой операции. Проверьте input: часть имён могла измениться.")
-                    raise
-                renamed = len(planned)
-                progress(
-                    f"Переименование завершено: {renamed} файлов. "
-                    + ("Итоговые PDF отложены из-за неподтверждённых дат." if unresolved else "Переход к объединению.")
-                )
+            name_overrides = {old: new.name for old, new in planned.items()}
+            renamed = 0
+            progress(f"Подтверждено дат: {len(planned)}. Исходные имена и содержимое PDF сохранены.")
 
     groups, ignored = discover_groups(input_dir, output_dir, recursive=recursive, name_overrides=name_overrides)
     classifications: dict[Path, DocumentClass] = {}
@@ -300,22 +290,22 @@ def process(
     )
     result = Result(
         files_ignored=len(ignored), groups_planned=len(plans),
-        files_renamed=renamed, ai_unresolved=len(unresolved),
+        files_renamed=renamed, files_dated=0 if dry_run else len(name_overrides), ai_unresolved=len(unresolved),
     )
     report_entries: list[tuple[Path, Path | None, str, str]] = [
         (path, None, "Не обработано", "НЕКОРРЕКТНАЯ_ДАТА")
         for path in ignored
     ]
     for path in ignored:
-        print(f"ПРОПУЩЕН (нет корректной даты YYYY-MM-DD-): {path.relative_to(input_dir)}")
+        print(f"ПРОПУЩЕН (нет корректной даты YYYY-MM-DD- или YYYY.MM.DD-): {path.relative_to(input_dir)}")
     if unresolved and not dry_run:
         print(
-            "\nНЕПОЛНАЯ AI-ПРОВЕРКА: документы с подтверждённой датой переименованы, "
+            "\nНЕПОЛНАЯ AI-ПРОВЕРКА: даты подтверждённых документов сохранены в локальном кэше, "
             "но создание итоговых PDF отложено до проверки оставшихся файлов."
         )
         print(
-            "При следующем запуске AI потребуется только для файлов без "
-            "правильного YYYY-MM-DD- имени. Исходные PDF и прежний output сохранены."
+            "При следующем запуске подтверждённые даты могут использоваться из кэша. "
+            "Исходные PDF и прежний output сохранены."
         )
         return result
 
@@ -326,7 +316,7 @@ def process(
     # Legacy mixed outputs in the root are preserved, never read as source or
     # treated as proof that new structured outputs were already produced.
     if output_dir.is_dir() and any(
-        re.fullmatch(r"\d{4}-\d{2}-\d{2}\.pdf", p.name) for p in output_dir.iterdir() if p.is_file()
+        re.fullmatch(r"\d{4}[-.]\d{2}[-.]\d{2}\.pdf", p.name) for p in output_dir.iterdir() if p.is_file()
     ):
         print("ВНИМАНИЕ: старые объединённые PDF в корне output сохранены без изменений.")
         print("Новые раздельные результаты будут записаны в подпапки Анализы, Обследования, На_проверку.")
@@ -408,7 +398,7 @@ def process(
     print(
         f"\nИтог: {result.groups_written} создано; {result.groups_skipped} пропущено; "
         f"{result.groups_failed} ошибок; {result.files_ignored} PDF с некорректной датой; "
-        f"{result.files_renamed} переименовано AI; "
+        f"{result.files_dated} дат подтверждено AI; "
         f"{result.ai_unresolved} требуют проверки даты."
     )
     return result
@@ -423,7 +413,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--recursive", action="store_true", help="Include subfolders of input")
     parser.add_argument("--overwrite", action="store_true", help="Replace existing merged files")
     parser.add_argument("--dry-run", action="store_true", help="Preview groups without writing; AI mode may still send text to API")
-    parser.add_argument("--rename-with-ai", action="store_true", help="Opt in to sending excerpts of wrongly named PDFs to external AI; rename them before merging")
+    parser.add_argument("--rename-with-ai", action="store_true", help="Opt in to identifying dates via AI without renaming original PDFs")
     parser.add_argument(
         "--classify-with-ai", choices=("review", "all"),
         help="Explicitly authorize external AI to classify review-only or all dated PDFs. May send medical text and incur API charges; uses local hash cache.",
