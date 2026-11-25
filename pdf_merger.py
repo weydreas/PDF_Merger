@@ -105,12 +105,18 @@ def plan_outputs(
     for day, paths in sorted(labs.items()):
         plans.append((output_dir / "Анализы" / f"{day.replace('-', '.')}-Анализы.pdf", paths, "Анализы"))
 
-    collisions: dict[tuple[str, str, str], int] = defaultdict(int)
+    # AI titles are free-form: a literal title ending in "-02" can collide
+    # with a suffix generated for another title. Reserve complete paths,
+    # case-insensitively on both platforms, before publishing any result.
+    occupied = {str(target).casefold() for target, _, _ in plans}
     for day, path, folder, title in individual:
-        key = (folder, day, title.casefold())
-        collisions[key] += 1
-        suffix = f"-{collisions[key]:02d}" if collisions[key] > 1 else ""
-        target = output_dir / folder / f"{day.replace('-', '.')}-{title}{suffix}.pdf"
+        stem = f"{day.replace('-', '.')}-{title}"
+        target = output_dir / folder / f"{stem}.pdf"
+        counter = 2
+        while str(target).casefold() in occupied:
+            target = output_dir / folder / f"{stem}-{counter:02d}.pdf"
+            counter += 1
+        occupied.add(str(target).casefold())
         plans.append((target, [path], folder))
     return plans
 
