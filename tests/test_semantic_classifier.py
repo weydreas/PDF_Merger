@@ -30,7 +30,7 @@ class SemanticClassifierTests(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        self.root = Path(tmp.name)
+        self.root = Path(tmp.name).resolve()
         self.input = self.root / "input"
         self.output = self.root / "output"
         self.input.mkdir()
