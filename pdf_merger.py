@@ -112,14 +112,14 @@ def plan_outputs(
     return plans
 
 
-def _write_atomic(paths: list[Path], target: Path, overwrite: bool) -> None:
+def _write_atomic(paths: list[Path], target: Path, overwrite: bool, page_selections: dict[Path, tuple[int, ...]] | None = None) -> None:
     """Prepare output locally, validate it, then publish without partial files."""
     temp_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(mode="wb", prefix=f".{target.stem}-", suffix=".tmp", dir=target.parent, delete=False) as handle:
             temp_path = Path(handle.name)
 
-        if len(paths) == 1:
+        if len(paths) == 1 and not (page_selections or {}).get(paths[0]):
             # Keep lone PDFs byte-identical, including original metadata/signatures.
             expected_pages = len(PdfReader(str(paths[0]), strict=False).pages)
             shutil.copyfile(paths[0], temp_path)
@@ -131,8 +131,15 @@ def _write_atomic(paths: list[Path], target: Path, overwrite: bool) -> None:
                     reader = PdfReader(str(source), strict=False)
                     if reader.is_encrypted:
                         raise ValueError(f"Password-protected PDF: {source.name}")
-                    expected_pages += len(reader.pages)
-                    writer.append(reader, import_outline=False)
+                    selected = (page_selections or {}).get(source)
+                    if selected is not None:
+                        if not selected or tuple(sorted(set(selected))) != selected or selected[0] < 0 or selected[-1] >= len(reader.pages):
+                            raise ValueError("Invalid page selection")
+                        expected_pages += len(selected)
+                        writer.append(reader, pages=list(selected), import_outline=False)
+                    else:
+                        expected_pages += len(reader.pages)
+                        writer.append(reader, import_outline=False)
                 with temp_path.open("wb") as handle:
                     writer.write(handle)
             finally:
@@ -157,6 +164,7 @@ def _write_membership_report(
     entries: list[tuple[Path, Path | None, str, str]],
     input_dir: Path,
     output_dir: Path,
+    page_selections: dict[Path, tuple[int, ...]] | None = None,
 ) -> Path:
     """Write a local UTF-8 Excel-friendly audit; never claim skipped items merged.
 
@@ -176,7 +184,7 @@ def _write_membership_report(
             writer = csv.writer(stream, delimiter=";")
             writer.writerow([
                 "Исходный PDF", "Категория", "Итоговый файл",
-                "Статус операции", "Подтверждено включение",
+                "Статус операции", "Подтверждено включение", "Сохранённые страницы (номера с 1)",
             ])
             for source, destination, category, status in entries:
                 included = (
@@ -188,6 +196,7 @@ def _write_membership_report(
                     str(source.relative_to(input_dir)), category,
                     str(destination.relative_to(output_dir)) if destination else "",
                     status, included,
+                    ",".join(str(i + 1) for i in (page_selections or {}).get(source, ())) if status == "СОЗДАНО" else "",
                 ])
         os.replace(temporary, target)
         temporary = None
@@ -202,6 +211,7 @@ def process(
     dry_run: bool = False, recursive: bool = False,
     rename_with_ai: bool = False, env_file: Path | None = None,
     ai_classification: str | None = None,
+    filter_lab_reference_pages: bool = False,
 ) -> Result:
     input_dir = input_dir.resolve()
     output_dir = output_dir.resolve()
@@ -211,6 +221,8 @@ def process(
         raise ValueError("Input and output directories must differ")
     if ai_classification not in (None, "review", "all"):
         raise ValueError("Invalid AI classification mode")
+    if filter_lab_reference_pages and not ai_classification:
+        raise ValueError("Reference page filtering requires explicit AI classification")
 
     name_overrides: dict[Path, str] = {}
     renamed = 0
@@ -284,6 +296,18 @@ def process(
                 ROOT / "logs" / "ai-classification-cache.json",
                 progress=progress,
             )
+    page_selections: dict[Path, tuple[int, ...]] = {}
+    if filter_lab_reference_pages and classifications:
+        from ai_renamer import AIProgressLog, load_config
+        from semantic_classifier import select_lab_pages
+        lab_paths = [path for path, decision in classifications.items() if decision.category == "lab"]
+        if lab_paths:
+            cfg = load_config(env_file or ROOT / ".env")
+            progress = AIProgressLog(ROOT / "logs" / "ai-progress.log")
+            for path in lab_paths:
+                selected = select_lab_pages(path, cfg, progress)
+                if selected is not None:
+                    page_selections[path] = selected
     plans = plan_outputs(
         groups, input_dir, output_dir, name_overrides=name_overrides,
         classifications=classifications,
@@ -342,7 +366,11 @@ def process(
             continue
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
-            _write_atomic(paths, target, overwrite=overwrite)
+            selected_for_target = {path: page_selections[path] for path in paths if category == "Анализы" and path in page_selections}
+            if selected_for_target:
+                _write_atomic(paths, target, overwrite=overwrite, page_selections=selected_for_target)
+            else:
+                _write_atomic(paths, target, overwrite=overwrite)
         except FileExistsError:
             print("  ПРОПУЩЕНО: результат уже создан другим процессом")
             report_entries.extend(
@@ -368,7 +396,7 @@ def process(
     if not dry_run:
         try:
             report_path = _write_membership_report(
-                report_entries, input_dir, output_dir
+                report_entries, input_dir, output_dir, page_selections
             )
         except OSError as exc:
             # A nonessential CSV export cannot interrupt PDF creation.
@@ -418,6 +446,7 @@ def main(argv: list[str] | None = None) -> int:
         "--classify-with-ai", choices=("review", "all"),
         help="Explicitly authorize external AI to classify review-only or all dated PDFs. May send medical text and incur API charges; uses local hash cache.",
     )
+    parser.add_argument("--filter-lab-reference-pages", action="store_true", help="Explicit consent to send individual text pages of AI-confirmed lab PDFs for reference-only filtering; original files stay unchanged")
     parser.add_argument("--env-file", type=Path, default=ROOT / ".env", help="AI settings file (default: ./.env)")
     parser.add_argument("--check-names", action="store_true", help="Validate PDF names locally; returns 3 if AI preflight is needed")
     args = parser.parse_args(argv)
@@ -436,6 +465,7 @@ def main(argv: list[str] | None = None) -> int:
             dry_run=args.dry_run, recursive=args.recursive,
             rename_with_ai=args.rename_with_ai, env_file=args.env_file,
             ai_classification=args.classify_with_ai,
+            filter_lab_reference_pages=args.filter_lab_reference_pages,
         )
     except (OSError, ValueError) as exc:
         print(f"ОШИБКА: {exc}", file=sys.stderr)
