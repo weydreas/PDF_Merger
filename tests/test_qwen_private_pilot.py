@@ -58,10 +58,16 @@ class PrivateQwenPilotTests(unittest.TestCase):
                 pilot.request_json("https://example.com")
             opener.assert_not_called()
 
+    def test_endpoint_is_explicit_private_ipv4(self):
+        self.assertEqual(pilot.private_endpoint("http://172.20.0.2:8080/v1"), "http://172.20.0.2:8080")
+        for endpoint in ("", "https://api.openai.com:443/v1", "http://8.8.8.8:8080", "http://localhost:8080", "http://192.168.1.1:8080/other", "http://user:pass@192.168.1.1:8080"):
+            with self.subTest(endpoint=endpoint), self.assertRaises(pilot.PilotError):
+                pilot.private_endpoint(endpoint)
+
     def test_truncated_reply_rejected(self):
         with patch.object(pilot, "request_json", return_value={"choices": [{"finish_reason": "length", "message": {"content": "{}"}}]}):
             with self.assertRaises(pilot.PilotError):
-                pilot.infer(self.regions, "qwen-4b")
+                pilot.infer(self.regions, "qwen-1.7b")
 
 
 if __name__ == "__main__":
