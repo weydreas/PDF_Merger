@@ -60,16 +60,16 @@ class MergerTests(unittest.TestCase):
         self.assertEqual(report.groups_written, 2)
         self.assertEqual(
             sorted(x.name for x in (self.output / "Анализы").iterdir()),
-            ["2024-05-29-Анализы.pdf", "2024-05-30-Анализы.pdf"],
+            ["2024.05.29-Анализы.pdf", "2024.05.30-Анализы.pdf"],
         )
-        reader = PdfReader(self.output / "Анализы" / "2024-05-29-Анализы.pdf")
+        reader = PdfReader(self.output / "Анализы" / "2024.05.29-Анализы.pdf")
         self.assertEqual([float(p.mediabox.width) for p in reader.pages], [101, 202, 203])
 
     def test_single_file_keeps_identical_bytes(self):
         path = self.input / "2026-01-01-only.pdf"
         make_pdf(path, [103])
         self.run_as_labs()
-        self.assertEqual((self.output / "Анализы" / "2026-01-01-Анализы.pdf").read_bytes(), path.read_bytes())
+        self.assertEqual((self.output / "Анализы" / "2026.01.01-Анализы.pdf").read_bytes(), path.read_bytes())
 
     def test_skips_existing_then_explicit_overwrite(self):
         file1 = self.input / "2025-02-13-first.pdf"
@@ -79,10 +79,10 @@ class MergerTests(unittest.TestCase):
         make_pdf(file2, [222])
         r = self.run_as_labs()
         self.assertEqual((r.groups_written, r.groups_skipped), (0, 1))
-        self.assertEqual(len(PdfReader(self.output / "Анализы" / "2025-02-13-Анализы.pdf").pages), 1)
+        self.assertEqual(len(PdfReader(self.output / "Анализы" / "2025.02.13-Анализы.pdf").pages), 1)
         r = self.run_as_labs(overwrite=True)
         self.assertEqual(r.groups_written, 1)
-        self.assertEqual(len(PdfReader(self.output / "Анализы" / "2025-02-13-Анализы.pdf").pages), 2)
+        self.assertEqual(len(PdfReader(self.output / "Анализы" / "2025.02.13-Анализы.pdf").pages), 2)
 
     def test_dry_run_changes_nothing(self):
         make_pdf(self.input / "2024-02-29-leap.pdf", [120])
@@ -103,8 +103,8 @@ class MergerTests(unittest.TestCase):
         make_pdf(self.input / "2024-01-02-ok.pdf", [102])
         r = self.run_as_labs()
         self.assertEqual((r.groups_failed, r.groups_written), (1, 1))
-        self.assertFalse((self.output / "Анализы" / "2024-01-01-Анализы.pdf").exists())
-        self.assertTrue((self.output / "Анализы" / "2024-01-02-Анализы.pdf").exists())
+        self.assertFalse((self.output / "Анализы" / "2024.01.01-Анализы.pdf").exists())
+        self.assertTrue((self.output / "Анализы" / "2024.01.02-Анализы.pdf").exists())
         self.assertEqual(list(self.output.glob("*.tmp")), [])
 
     def test_recursive_excludes_output_subfolder(self):
@@ -117,7 +117,7 @@ class MergerTests(unittest.TestCase):
         ):
             r = process(self.input, out, recursive=True)
         self.assertEqual(r.groups_written, 1)
-        self.assertEqual(len(PdfReader(out / "Анализы" / "2024-08-01-Анализы.pdf").pages), 1)
+        self.assertEqual(len(PdfReader(out / "Анализы" / "2024.08.01-Анализы.pdf").pages), 1)
 
     def test_real_text_classification_prefers_xray_to_generic_tests(self):
         study = classify_text(
@@ -141,7 +141,7 @@ class MergerTests(unittest.TestCase):
             "Описание\nРентгенография грудной клетки.\n"
             "Заключение\nРекомендовано УЗИ для дальнейшей оценки.\n"
         )
-        result = classify_text("2026-11-17-Требует-проверки.pdf", sample)
+        result = classify_text("2026.11.17-Требует-проверки.pdf", sample)
         self.assertEqual((result.category, result.title),
                          ("study", "Рентгенография грудной клетки"))
 
@@ -153,7 +153,7 @@ class MergerTests(unittest.TestCase):
             + "7014145 - Электрокардиография. Врач: И.И.\n"
             + "Заключение\nЭлектрокардиография: ритм синусовый.\n"
         )
-        result = classify_text("2026-11-21-Требует-проверки.pdf", sample)
+        result = classify_text("2026.11.21-Требует-проверки.pdf", sample)
         self.assertEqual((result.category, result.title), ("study", "ЭКГ"))
 
     def test_study_names_are_short_and_based_on_performed_procedure(self):
@@ -167,7 +167,7 @@ class MergerTests(unittest.TestCase):
                     "Дата назначения лабораторного исследования: 10.11.2026\n"
                     "7002892 - " + procedure + ". Врач: И.И.\n"
                 )
-                got = classify_text("2026-11-10-Требует-проверки.pdf", sample)
+                got = classify_text("2026.11.10-Требует-проверки.pdf", sample)
                 self.assertEqual((got.category, got.title), ("study", expected))
 
     def test_lab_codes_are_labs_not_generic_export_headers(self):
@@ -177,7 +177,7 @@ class MergerTests(unittest.TestCase):
             "A09.05.042 - Аланинаминотрансфераза. Врач: И.И.\n"
             "Лейкоциты WBC 5.0 10Е9/л\n"
         )
-        self.assertEqual(classify_text("2026-11-17-Требует-проверки.pdf", sample).category, "lab")
+        self.assertEqual(classify_text("2026.11.17-Требует-проверки.pdf", sample).category, "lab")
 
     def test_mixed_procedure_rows_and_generic_header_require_review(self):
         for sample in (
@@ -194,20 +194,20 @@ class MergerTests(unittest.TestCase):
 
     def test_synthetic_export_routing_keeps_five_exams_separate_without_ai(self):
         texts = {
-            "2026-11-17-Требует-проверки.pdf":
+            "2026.11.17-Требует-проверки.pdf":
                 "Дата назначения лабораторного исследования\n"
                 "7002892 - Рентгенография грудной клетки. Врач: И.И.\n",
-            "2026-11-17-Требует-проверки-02.pdf":
+            "2026.11.17-Требует-проверки-02.pdf":
                 "Дата назначения лабораторного исследования\n"
                 "7014145 - Электрокардиография. Врач: И.И.\n",
-            "2026-11-17-Требует-проверки-03.pdf":
+            "2026.11.17-Требует-проверки-03.pdf":
                 "Дата назначения лабораторного исследования\n"
                 "7002892 - Рентгенография грудной клетки. Врач: И.И.\n",
-            "2026-11-18-Требует-проверки.pdf":
+            "2026.11.18-Требует-проверки.pdf":
                 "Дата назначения лабораторного исследования\n"
                 "7002892 - Рентгенография грудной клетки. Врач: И.И.\n"
                 "Заключение: рекомендовано УЗИ плевральных полостей.\n",
-            "2026-11-21-Требует-проверки.pdf":
+            "2026.11.21-Требует-проверки.pdf":
                 "Дата назначения лабораторного исследования\n"
                 "7014145 - Электрокардиография. Врач: И.И.\n",
             "2026-11-17-ОАК.pdf":
@@ -228,11 +228,11 @@ class MergerTests(unittest.TestCase):
         self.assertEqual(
             sorted(x.name for x in studies),
             [
-                "2026-11-17-Рентгенография грудной клетки-02.pdf",
-                "2026-11-17-Рентгенография грудной клетки.pdf",
-                "2026-11-17-ЭКГ.pdf",
-                "2026-11-18-Рентгенография грудной клетки.pdf",
-                "2026-11-21-ЭКГ.pdf",
+                "2026.11.17-Рентгенография грудной клетки-02.pdf",
+                "2026.11.17-Рентгенография грудной клетки.pdf",
+                "2026.11.17-ЭКГ.pdf",
+                "2026.11.18-Рентгенография грудной клетки.pdf",
+                "2026.11.21-ЭКГ.pdf",
             ],
         )
         self.assertEqual(
@@ -261,7 +261,7 @@ class MergerTests(unittest.TestCase):
         )
         for text in examples:
             with self.subTest(text=text[:20]):
-                result = classify_text("2026-11-18-Требует-проверки.pdf", text)
+                result = classify_text("2026.11.18-Требует-проверки.pdf", text)
                 self.assertEqual(result.category, "lab", result)
 
     def test_numeric_procedure_ids_still_route_to_examinations(self):
@@ -270,13 +270,13 @@ class MergerTests(unittest.TestCase):
             "7002892 - Рентгенография грудной клетки. Врач: И.И.\n"
             "Гемоглобин 125 г/л 110.0 - 160.0\n"
         )
-        result = classify_text("2026-11-18-Требует-проверки.pdf", document)
+        result = classify_text("2026.11.18-Требует-проверки.pdf", document)
         self.assertEqual((result.category, result.title),
                          ("study", "Рентгенография грудной клетки"))
 
     def test_membership_report_marks_created_only_when_confirmed(self):
-        first = self.input / "2026-11-17-Требует-проверки.pdf"
-        second = self.input / "2026-11-17-Требует-проверки-02.pdf"
+        first = self.input / "2026.11.17-Требует-проверки.pdf"
+        second = self.input / "2026.11.17-Требует-проверки-02.pdf"
         make_pdf(first, [111])
         with patch(
             "pdf_merger.classify_document",
@@ -297,7 +297,7 @@ class MergerTests(unittest.TestCase):
         self.assertTrue(all(row["Подтверждено включение"] == "НЕ ПОДТВЕРЖДЕНО" for row in rows))
         self.assertTrue(all(row["Статус операции"] == "ПРОПУЩЕНО_УЖЕ_СУЩЕСТВУЕТ" for row in rows))
         self.assertIn("НЕ ОБНОВЛЁН", self.last_run_output)
-        self.assertEqual(len(PdfReader(self.output / "Анализы" / "2026-11-17-Анализы.pdf").pages), 1)
+        self.assertEqual(len(PdfReader(self.output / "Анализы" / "2026.11.17-Анализы.pdf").pages), 1)
 
         with patch(
             "pdf_merger.classify_document",
@@ -311,7 +311,7 @@ class MergerTests(unittest.TestCase):
         self.assertTrue(all(row["Статус операции"] == "СОЗДАНО" for row in rows))
         self.assertEqual(
             sorted(int(page.mediabox.width) for page in PdfReader(
-                self.output / "Анализы" / "2026-11-17-Анализы.pdf").pages),
+                self.output / "Анализы" / "2026.11.17-Анализы.pdf").pages),
             [111, 222],
         )
         self.assertEqual(first.read_bytes(), (self.input / first.name).read_bytes())
@@ -357,7 +357,7 @@ class MergerTests(unittest.TestCase):
         ), patch("pdf_merger._write_membership_report", side_effect=PermissionError("denied")):
             report = self.run_process()
         self.assertEqual(report.groups_written, 1, self.last_run_output)
-        self.assertTrue((self.output / "Анализы" / "2026-11-17-Анализы.pdf").exists())
+        self.assertTrue((self.output / "Анализы" / "2026.11.17-Анализы.pdf").exists())
         self.assertIn("отчёт о составе не записан", self.last_run_output)
 
     def test_lab_and_study_on_same_date_never_merge(self):
@@ -373,8 +373,8 @@ class MergerTests(unittest.TestCase):
         with patch("pdf_merger.classify_document", side_effect=classification):
             result = self.run_process()
         self.assertEqual(result.groups_written, 2, self.last_run_output)
-        labs = self.output / "Анализы" / "2026-05-19-Анализы.pdf"
-        imaging = self.output / "Обследования" / "2026-05-19-Рентгенография грудной клетки.pdf"
+        labs = self.output / "Анализы" / "2026.05.19-Анализы.pdf"
+        imaging = self.output / "Обследования" / "2026.05.19-Рентгенография грудной клетки.pdf"
         self.assertEqual([int(x.mediabox.width) for x in PdfReader(labs).pages], [111, 222])
         self.assertEqual(imaging.read_bytes(), xray.read_bytes())
         self.assertEqual(len(PdfReader(imaging).pages), 1)
@@ -393,10 +393,10 @@ class MergerTests(unittest.TestCase):
         folder = self.output / "Обследования"
         self.assertEqual(
             sorted(x.name for x in folder.iterdir()),
-            ["2026-05-19-Рентгенография-02.pdf", "2026-05-19-Рентгенография.pdf"],
+            ["2026.05.19-Рентгенография-02.pdf", "2026.05.19-Рентгенография.pdf"],
         )
         self.assertEqual(
-            (folder / "2026-05-19-Рентгенография-02.pdf").read_bytes(),
+            (folder / "2026.05.19-Рентгенография-02.pdf").read_bytes(),
             second.read_bytes(),
         )
 
@@ -413,11 +413,11 @@ class MergerTests(unittest.TestCase):
             r = self.run_process()
         self.assertEqual(r.groups_written, 2, self.last_run_output)
         self.assertEqual(
-            (self.output / "На_проверку" / "2026-05-19-Требует-проверки.pdf").read_bytes(),
+            (self.output / "На_проверку" / "2026.05.19-Требует-проверки.pdf").read_bytes(),
             unknown.read_bytes(),
         )
         self.assertEqual(
-            (self.output / "Анализы" / "2026-05-19-Анализы.pdf").read_bytes(),
+            (self.output / "Анализы" / "2026.05.19-Анализы.pdf").read_bytes(),
             lab.read_bytes(),
         )
 
@@ -434,7 +434,7 @@ class MergerTests(unittest.TestCase):
             [int(p.mediabox.width) for p in PdfReader(self.output / "2026-05-19.pdf").pages],
             [999],
         )
-        self.assertTrue((self.output / "Анализы" / "2026-05-19-Анализы.pdf").exists())
+        self.assertTrue((self.output / "Анализы" / "2026.05.19-Анализы.pdf").exists())
 
     def test_input_output_same_rejected(self):
         with self.assertRaisesRegex(ValueError, "must differ"):
