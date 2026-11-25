@@ -283,7 +283,7 @@ def plan_renames(
     *, unresolved: list[UnresolvedDocument] | None = None,
     cache_file: Path | None = None,
 ) -> dict[Path, Path]:
-    """Plan safe renames; optionally skip unverified dates for batch processing.
+    """Plan virtual names without changing source paths; optionally skip unverified dates.
 
     By default a rejected date remains fatal for all-or-nothing callers.
     With unresolved supplied, only date-validation failures are recoverable;
@@ -421,20 +421,3 @@ def plan_renames(
         if progress:
             progress(f"{prefix}: дата подтверждена, имя запланировано. Файл ещё не изменён.")
     return planned
-
-
-def apply_renames(planned: dict[Path, Path]) -> None:
-    """Never overwrite an existing file; use hard links before unlinking originals."""
-    for source, target in planned.items():
-        try:
-            os.link(source, target)  # raises if target already exists
-            try:
-                source.unlink()
-            except OSError:
-                target.unlink(missing_ok=True)
-                raise
-        except OSError as exc:
-            raise RenameError(
-                f"Не удалось переименовать {source.name}: {type(exc).__name__}. "
-                "Ранее переименованные файлы сохранены; проверьте input перед повтором."
-            ) from exc
