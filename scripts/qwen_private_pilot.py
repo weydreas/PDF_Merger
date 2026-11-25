@@ -174,7 +174,7 @@ def request_json(path, payload=None):
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
     endpoint = private_endpoint(os.environ.get("PDF_MERGER_LOCAL_QWEN_URL", ""))
     req = urllib.request.Request(endpoint + path, data=data, headers={"Content-Type": "application/json"})
-    with opener.open(req, timeout=180) as response:
+    with opener.open(req, timeout=600) as response:
         raw = response.read(MAX_REPLY + 1)
     if len(raw) > MAX_REPLY:
         raise PilotError("response too large")
@@ -189,6 +189,7 @@ def infer(regions, model):
             {"role": "user", "content": json.dumps({"regions": regions}, ensure_ascii=False)},
         ],
         "temperature": 0,
+        "chat_template_kwargs": {"enable_thinking": False},
         "max_tokens": 1500,
         "response_format": {"type": "json_object"},
         "stream": False,
@@ -212,26 +213,46 @@ def assess(fixture, reply):
     }
 
 
+def verified_model(response):
+    """Match the observed deployed model metadata; not a cryptographic identity check."""
+    models = response.get("data") if isinstance(response, dict) else None
+    if not isinstance(models, list) or len(models) != 1 or not isinstance(models[0], dict):
+        raise PilotError("expected exactly one local model")
+    item = models[0]
+    model = item.get("id")
+    meta = item.get("meta")
+    if not isinstance(model, str) or not isinstance(meta, dict):
+        raise PilotError("missing model metadata")
+    if model != "/models/model.gguf" and not (
+        re.search(r"qwen", model, re.I) and re.search(r"(?<!\d)1[._-]7b(?!\d)", model, re.I)
+    ):
+        raise PilotError("unexpected model ID")
+    expected = {"n_ctx": 16384, "n_params": 2031739904, "size": 1276487680,
+                "n_vocab": 151936, "n_embd": 2048, "ftype": "Q4_K - Medium"}
+    if any(meta.get(key) != value for key, value in expected.items()):
+        raise PilotError("unexpected model metadata or context")
+    return model
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--case", choices=["all", *FIXTURES], default="all")
     args = parser.parse_args()
     try:
-        models = request_json("/v1/models")["data"]
-        if len(models) != 1 or not isinstance(models[0]["id"], str):
-            raise PilotError("expected exactly one local model")
-        model = models[0]["id"]
-        # Never silently benchmark a different model.
-        if not re.search(r"qwen", model, re.I) or not re.search(r"(?<!\d)1[._-]7b(?!\d)", model, re.I):
-            raise PilotError("local model ID does not identify Qwen 1.7B")
+        model = verified_model(request_json("/v1/models"))
         passed = True
         names = FIXTURES if args.case == "all" else [args.case]
         for name in names:
             fixture = FIXTURES[name]
-            reply = infer(regions_for(fixture), model)
-            metrics = assess(fixture, reply)
+            try:
+                reply = infer(regions_for(fixture), model)
+                metrics = assess(fixture, reply)
+            except Exception as exc:
+                print(json.dumps({"case": name, "pass": False, "error": type(exc).__name__}), flush=True)
+                passed = False
+                continue
             ok = not any(metrics[k] for k in ("missed_masks", "extra_masks", "review_regions")) and metrics["category_correct"] and metrics["date_correct"]
-            print(json.dumps({"case": name, "pass": ok, **metrics}, ensure_ascii=False))
+            print(json.dumps({"case": name, "pass": ok, **metrics}, ensure_ascii=False), flush=True)
             passed = passed and ok
         return 0 if passed else 1
     except Exception as exc:
