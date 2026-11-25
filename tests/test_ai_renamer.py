@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from pypdf import PdfReader, PdfWriter
 
-from ai_renamer import AIConfig, AIProgressLog, RenameError, _verified_date, apply_renames, load_config, plan_renames, request_suggestion
+from ai_renamer import AIConfig, AIProgressLog, RenameError, _verified_date, load_config, plan_renames, request_suggestion
 from pdf_merger import main, process
 
 
@@ -48,12 +48,12 @@ class AIRenameTests(unittest.TestCase):
              patch('ai_renamer.request_suggestion', return_value=self.suggestion()) as api, \
              redirect_stdout(StringIO()):
             result = process(self.input, self.output, rename_with_ai=True, env_file=self.env)
-        self.assertEqual(result.files_renamed, 1)
+        self.assertEqual(result.files_dated, 1)
         self.assertEqual(result.groups_written, 1)
         new = self.input / '2026-05-19-Требует-проверки.pdf'
-        self.assertFalse(src.exists())
-        self.assertEqual(new.read_bytes(), original)
-        self.assertEqual((self.output / 'На_проверку' / '2026-05-19-Требует-проверки.pdf').read_bytes(), original)
+        self.assertFalse(new.exists())
+        self.assertEqual(src.read_bytes(), original)
+        self.assertEqual((self.output / 'На_проверку' / '2026.05.19-Требует-проверки.pdf').read_bytes(), original)
         api.assert_called_once()
 
     def test_clean_names_never_need_key_or_api(self):
@@ -61,7 +61,7 @@ class AIRenameTests(unittest.TestCase):
         with patch('ai_renamer.request_suggestion') as api, redirect_stdout(StringIO()):
             result = process(self.input, self.output, rename_with_ai=True, env_file=self.root / 'absent')
         self.assertEqual(result.groups_written, 1)
-        self.assertEqual(result.files_renamed, 0)
+        self.assertEqual(result.files_dated, 0)
         api.assert_not_called()
 
     def test_missing_key_stops_before_merge_and_rename(self):
@@ -175,18 +175,14 @@ class AIRenameTests(unittest.TestCase):
                  self.suggestion(), self.suggestion(day='', evidence=''), self.suggestion(),
              ]) as api, redirect_stdout(output):
             report = process(self.input, self.output, rename_with_ai=True, env_file=self.env)
-        self.assertEqual((report.files_renamed, report.ai_unresolved, report.groups_written), (2, 1, 0))
+        self.assertEqual((report.files_dated, report.ai_unresolved, report.groups_written), (2, 1, 0))
         self.assertEqual(api.call_count, 3)
-        self.assertFalse(source[0].exists())
-        self.assertTrue(source[1].exists())
-        self.assertFalse(source[2].exists())
-        self.assertEqual(source[1].read_bytes(), originals[1])
+        self.assertEqual([path.read_bytes() for path in source], originals)
         self.assertFalse(self.output.exists())
         self.assertIn('документ 2/3', output.getvalue())
         self.assertIn('b.pdf', output.getvalue())
         self.assertIn('создание итоговых PDF отложено', output.getvalue())
-        self.assertTrue((self.input / '2026-05-19-Требует-проверки.pdf').exists())
-        self.assertTrue((self.input / '2026-05-19-Требует-проверки-02.pdf').exists())
+        self.assertEqual({p.name for p in self.input.glob('*.pdf')}, {'a.pdf', 'b.pdf', 'c.pdf'})
 
         # Only the one unresolved PDF needs another paid API request.
         with patch('ai_renamer.extract_excerpt', return_value='Дата 19.05.2026'), \
@@ -194,7 +190,7 @@ class AIRenameTests(unittest.TestCase):
              redirect_stdout(StringIO()):
             second = process(self.input, self.output, rename_with_ai=True, env_file=self.env)
         api.assert_called_once()
-        self.assertEqual((second.files_renamed, second.ai_unresolved, second.groups_written), (1, 0, 3))
+        self.assertEqual((second.files_dated, second.ai_unresolved, second.groups_written), (3, 0, 3))
         self.assertEqual(len(list((self.output / 'На_проверку').glob('*.pdf'))), 3)
         self.assertEqual(
             sorted(path.read_bytes() for path in (self.output / 'На_проверку').glob('*.pdf')),
@@ -315,10 +311,10 @@ class AIRenameTests(unittest.TestCase):
              patch('ai_renamer.request_suggestion', return_value=self.suggestion()), \
              patch('pdf_merger.ROOT', self.root), redirect_stdout(StringIO()):
             report = process(self.input, self.output, rename_with_ai=True, env_file=self.env)
-        self.assertEqual(report.files_renamed, 1)
+        self.assertEqual(report.files_dated, 1)
         log = (self.root / 'logs' / 'ai-progress.log').read_text(encoding='utf-8')
         self.assertIn('Документ 1/1', log)
-        self.assertIn('Переименование завершено', log)
+        self.assertIn('Исходные имена и содержимое PDF сохранены', log)
         for private in ('patient-private-name', 'test-secret', '19.05.2026', 'Lab report'):
             self.assertNotIn(private, log)
 
@@ -401,9 +397,9 @@ class AIRenameTests(unittest.TestCase):
              patch('ai_renamer.request_suggestion', return_value=self.suggestion()):
             planned = plan_renames([src1, src2], self.input, self.env)
         self.assertEqual([p.name for p in planned.values()], ['2026-05-19-Требует-проверки-02.pdf', '2026-05-19-Требует-проверки-03.pdf'])
-        apply_renames(planned)
         self.assertTrue(existing.exists())
-        self.assertTrue(all(p.exists() for p in planned.values()))
+        self.assertTrue(src1.exists() and src2.exists())
+        self.assertTrue(all(not p.exists() for p in planned.values()))
 
     def test_dry_run_previews_ai_groups_but_changes_nothing(self):
         src = self.input / 'scan.pdf'
@@ -413,7 +409,7 @@ class AIRenameTests(unittest.TestCase):
              patch('ai_renamer.request_suggestion', return_value=self.suggestion()), redirect_stdout(out):
             report = process(self.input, self.output, rename_with_ai=True, env_file=self.env, dry_run=True)
         self.assertEqual(report.groups_planned, 1)
-        self.assertEqual(report.files_renamed, 0)
+        self.assertEqual(report.files_dated, 0)
         self.assertTrue(src.exists())
         self.assertFalse(self.output.exists())
         self.assertIn('ПЛАН AI:', out.getvalue())
@@ -442,7 +438,7 @@ class AIRenameTests(unittest.TestCase):
         with patch('ai_renamer.extract_excerpt', return_value='19.05.2026'), \
              patch('ai_renamer.request_suggestion', return_value=self.suggestion()), redirect_stdout(StringIO()):
             report = process(self.input, self.input / 'output', rename_with_ai=True, env_file=self.env, recursive=True)
-        self.assertEqual(report.files_renamed, 1)
+        self.assertEqual(report.files_dated, 1)
         self.assertTrue((self.input / 'output' / 'undated.pdf').exists())
 
     def test_url_rejects_http_and_injected_credentials(self):
@@ -476,7 +472,7 @@ class AIRenameTests(unittest.TestCase):
         with patch('ai_renamer.extract_excerpt', return_value='19.05.2026'), \
              patch('ai_renamer.request_suggestion', return_value=self.suggestion()), redirect_stdout(StringIO()):
             report = process(self.input, self.output, rename_with_ai=True, env_file=self.env)
-        self.assertEqual(report.files_renamed, 1)
+        self.assertEqual(report.files_dated, 1)
 
 
 if __name__ == '__main__':
