@@ -96,18 +96,21 @@ def plan_outputs(
             elif classification.category == "study":
                 individual.append((day, path, "Обследования", classification.title))
             else:
-                individual.append((day, path, "На_проверку", "Требует-проверки"))
+                title = classification.title or "Требует-проверки"
+                if title != "Требует-проверки":
+                    title = f"{title}-Требует-проверки"
+                individual.append((day, path, "На_проверку", title))
 
     plans: list[tuple[Path, list[Path], str]] = []
     for day, paths in sorted(labs.items()):
-        plans.append((output_dir / "Анализы" / f"{day.replace(chr(45), chr(46))}-Анализы.pdf", paths, "Анализы"))
+        plans.append((output_dir / "Анализы" / f"{day.replace('-', '.')}-Анализы.pdf", paths, "Анализы"))
 
     collisions: dict[tuple[str, str, str], int] = defaultdict(int)
     for day, path, folder, title in individual:
         key = (folder, day, title.casefold())
         collisions[key] += 1
         suffix = f"-{collisions[key]:02d}" if collisions[key] > 1 else ""
-        target = output_dir / folder / f"{day.replace(chr(45), chr(46))}-{title}{suffix}.pdf"
+        target = output_dir / folder / f"{day.replace('-', '.')}-{title}{suffix}.pdf"
         plans.append((target, [path], folder))
     return plans
 
@@ -165,6 +168,8 @@ def _write_membership_report(
     input_dir: Path,
     output_dir: Path,
     page_selections: dict[Path, tuple[int, ...]] | None = None,
+    classifications: dict[Path, DocumentClass] | None = None,
+    ai_paths: set[Path] | None = None,
 ) -> Path:
     """Write a local UTF-8 Excel-friendly audit; never claim skipped items merged.
 
@@ -184,7 +189,7 @@ def _write_membership_report(
             writer = csv.writer(stream, delimiter=";")
             writer.writerow([
                 "Исходный PDF", "Категория", "Итоговый файл",
-                "Статус операции", "Подтверждено включение", "Сохранённые страницы (номера с 1)",
+                "Статус операции", "Подтверждено включение", "Сохранённые страницы (номера с 1)", "Источник классификации", "Причина классификации",
             ])
             for source, destination, category, status in entries:
                 included = (
@@ -197,6 +202,8 @@ def _write_membership_report(
                     str(destination.relative_to(output_dir)) if destination else "",
                     status, included,
                     ",".join(str(i + 1) for i in (page_selections or {}).get(source, ())) if status == "СОЗДАНО" else "",
+                    "AI" if source in (ai_paths or set()) else "Локально" if source in (classifications or {}) else "",
+                    (classifications or {})[source].reason if source in (classifications or {}) else "",
                 ])
         os.replace(temporary, target)
         temporary = None
@@ -204,6 +211,49 @@ def _write_membership_report(
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+
+
+def _previous_generated_targets(output_dir: Path) -> set[Path]:
+    """Only trust outputs explicitly confirmed by a prior local membership report."""
+    report = output_dir / "Состав_результатов.csv"
+    targets: set[Path] = set()
+    try:
+        if report.is_symlink():
+            return targets
+        with report.open(encoding="utf-8-sig", newline="") as stream:
+            for row in csv.DictReader(stream, delimiter=";"):
+                if row.get("Статус операции") != "СОЗДАНО":
+                    continue
+                relative = Path(row.get("Итоговый файл") or "")
+                if (relative.is_absolute() or len(relative.parts) != 2
+                        or relative.parts[0] not in ("Анализы", "Обследования", "На_проверку")
+                        or relative.name in ("", "..") or relative.suffix.lower() != ".pdf"):
+                    continue
+                target = output_dir / relative
+                if target.is_file() and not target.is_symlink() and not target.parent.is_symlink():
+                    if target.resolve().is_relative_to(output_dir.resolve()):
+                        targets.add(target)
+    except (OSError, ValueError, csv.Error):
+        pass
+    return targets
+
+
+def _archive_stale_outputs(output_dir: Path, stale: set[Path]) -> None:
+    if not stale:
+        return
+    archive_root = output_dir / "_previous"
+    if archive_root.is_symlink():
+        raise OSError("Archive directory is a link")
+    archive_root.mkdir(exist_ok=True)
+    archive = Path(tempfile.mkdtemp(prefix="run-", dir=archive_root))
+    for source in sorted(stale):
+        relative = source.relative_to(output_dir)
+        destination = archive / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if source.is_symlink() or source.parent.is_symlink():
+            raise OSError("Managed output changed into a link")
+        source.rename(destination)
+        print(f"  Прежний автоматически созданный результат перенесён в _previous: {relative}")
 
 
 def process(
@@ -308,6 +358,11 @@ def process(
                 selected = select_lab_pages(path, cfg, progress)
                 if selected is not None:
                     page_selections[path] = selected
+    ai_decided = set(classifications)
+    for paths in groups.values():
+        for path in paths:
+            if path not in classifications:
+                classifications[path] = classify_document(path, effective_name=name_overrides.get(path, path.name))
     plans = plan_outputs(
         groups, input_dir, output_dir, name_overrides=name_overrides,
         classifications=classifications,
@@ -345,6 +400,7 @@ def process(
         print("ВНИМАНИЕ: старые объединённые PDF в корне output сохранены без изменений.")
         print("Новые раздельные результаты будут записаны в подпапки Анализы, Обследования, На_проверку.")
 
+    prior_generated = _previous_generated_targets(output_dir) if overwrite and not dry_run else set()
     for target, paths, category in plans:
         print(f"\n{category}: {len(paths)} PDF -> {target.relative_to(output_dir)}")
         for index, source in enumerate(paths, start=1):
@@ -380,6 +436,8 @@ def process(
             result.groups_skipped += 1
         except Exception as exc:
             print(f"  ОШИБКА: {type(exc).__name__}: {exc}", file=sys.stderr)
+            if isinstance(exc, PermissionError):
+                print(f"  Проверьте права доступа и закройте PDF/CSV в редакторе: {target.relative_to(output_dir)}", file=sys.stderr)
             report_entries.extend(
                 (source, target, category, "ОШИБКА")
                 for source in paths
@@ -394,9 +452,14 @@ def process(
             result.groups_written += 1
 
     if not dry_run:
+        if overwrite and not result.groups_failed and not result.groups_skipped and not ignored:
+            try:
+                _archive_stale_outputs(output_dir, prior_generated - {target for target, _, _ in plans})
+            except OSError as exc:
+                print(f"ПРЕДУПРЕЖДЕНИЕ: прежние результаты не полностью архивированы: {type(exc).__name__}. Проверьте output и _previous.", file=sys.stderr)
         try:
             report_path = _write_membership_report(
-                report_entries, input_dir, output_dir, page_selections
+                report_entries, input_dir, output_dir, page_selections, classifications, ai_decided
             )
         except OSError as exc:
             # A nonessential CSV export cannot interrupt PDF creation.
