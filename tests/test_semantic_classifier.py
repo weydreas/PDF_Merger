@@ -30,7 +30,7 @@ class SemanticClassifierTests(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        self.root = Path(tmp.name)
+        self.root = Path(tmp.name).resolve()
         self.input = self.root / "input"
         self.output = self.root / "output"
         self.input.mkdir()
@@ -41,8 +41,8 @@ class SemanticClassifierTests(unittest.TestCase):
             encoding="utf-8",
         )
         self.cache = self.root / "logs" / "ai-classification-cache.json"
-        self.first = self.input / "2026-11-18-Требует-проверки.pdf"
-        self.second = self.input / "2026-11-18-Требует-проверки-02.pdf"
+        self.first = self.input / "2026.11.18-Требует-проверки.pdf"
+        self.second = self.input / "2026.11.18-Требует-проверки-02.pdf"
         make_pdf(self.first, width=151)
         make_pdf(self.second, width=252)
 
@@ -77,70 +77,116 @@ class SemanticClassifierTests(unittest.TestCase):
         self.assertEqual((got.category, got.title),
                          ("study", "Рентгенография грудной клетки"))
 
-    def test_unverified_evidence_and_generic_headers_do_not_merge(self):
-        excerpt = (
-            "Дата назначения лабораторного исследования\n"
-            "7002892 - Рентгенография грудной клетки. Врач: Т.Т.\n"
-        )
-        candidates = (
-            {"category": "lab", "title": "Анализы",
-             "evidence": "Дата назначения лабораторного исследования"},
-            {"category": "lab", "title": "Анализы",
-             "evidence": "Общий анализ крови"},
-            {"category": "study", "title": "КТ уважаемого пациента",
-             "evidence": "7002892 - Рентгенография грудной клетки."},
-            {"category": "lab", "title": "Анализы",
-             "evidence": "7002892 - Рентгенография грудной клетки."},
-        )
-        for candidate in candidates:
-            with self.subTest(candidate=candidate):
+    def test_single_short_analyte_is_sufficient(self):
+        for evidence in ("Глюкоза", "ТТГ", "Калий\n4.2 ммоль/л", ""):
+            with self.subTest(evidence=evidence):
                 result = _sanitize_classification(
-                    candidate, excerpt,
-                    DocumentClass("study", "Рентгенография грудной клетки", "text"),
+                    {"category": "lab", "title": "Анализы", "evidence": evidence},
+                    evidence,
+                    DocumentClass("review", "Требует-проверки", "неоднозначный набор проведённых процедур"),
                 )
-                self.assertEqual(result.category, "review")
+                self.assertEqual(result.category, "lab")
 
-    def test_model_cannot_label_an_exam_as_lab_when_local_is_uncertain(self):
-        excerpt = "7002892 - Рентгенография грудной клетки. Врач: Т.Т."
-        claim = {
-            "category": "lab", "title": "Анализы",
-            "evidence": "7002892 - Рентгенография грудной клетки.",
-        }
+    def test_model_decision_is_not_vetoed_by_local_modality(self):
         result = _sanitize_classification(
-            claim, excerpt,
-            DocumentClass("review", "Требует-проверки", "unknown"),
+            {"category": "lab", "title": "Анализы", "evidence": "Глюкоза"},
+            "Глюкоза 5.2. Рекомендовано УЗИ.",
+            DocumentClass("study", "УЗИ", "local heuristic"),
+        )
+        self.assertEqual(result.category, "lab")
+
+    def test_model_can_choose_review_for_genuinely_mixed_documents(self):
+        result = _sanitize_classification(
+            {"category": "review", "title": "Требует-проверки", "evidence": ""},
+            "ЭКГ и анализ крови фактически выполнены.",
+            DocumentClass("lab", "Анализы", "local heuristic"),
         )
         self.assertEqual(result.category, "review")
 
-    def test_only_recommended_ultrasound_is_not_accepted_as_performed(self):
-        excerpt = (
-            "Заключение. Рекомендовано УЗИ плевральных полостей. "
-            "При ухудшении состояния обратиться к врачу."
-        )
-        claim = {
-            "category": "study", "title": "УЗИ плевральных полостей",
-            "evidence": "УЗИ плевральных полостей",
-        }
+    def test_study_outside_previous_whitelist_is_accepted(self):
         result = _sanitize_classification(
-            claim, excerpt,
+            {"category": "study", "title": "Ангиоскан", "evidence": ""},
+            "Ангиоскан",
             DocumentClass("review", "Требует-проверки", "unknown"),
         )
-        self.assertEqual(result.category, "review")
+        self.assertEqual((result.category, result.title), ("study", "Ангиоскан"))
 
-    def test_structural_mixed_procedures_are_not_trusted_from_ai(self):
-        excerpt = (
-            "7002892 - Рентгенография грудной клетки. Врач: Т.Т.\n"
-            "B03.016.002 - Общий анализ крови. Врач: Т.Т.\n"
-        )
-        answer = {
-            "category": "lab", "title": "Анализы",
-            "evidence": "B03.016.002 - Общий анализ крови.",
+    def test_malformed_response_and_unsafe_filename_still_require_review(self):
+        for answer in (None, {}, {"category": "unknown"}, {"category": "study", "title": "../outside"}, {"category": "study", "title": "a\\\\b"}, {"category": "study", "title": ""}):
+            with self.subTest(answer=answer):
+                self.assertEqual(_sanitize_classification(answer, "").category, "review")
+
+    def test_prompt_change_invalidates_cached_decision(self):
+        answer = {"category": "lab", "title": "Анализы", "evidence": "Глюкоза"}
+        with patch("semantic_classifier.extract_excerpt", return_value="Глюкоза 5.2"), patch("semantic_classifier.request_classification", return_value=answer) as api:
+            classify_documents_with_ai([self.first], self.env, self.cache)
+            with patch("semantic_classifier.INSTRUCTIONS", "Changed instructions"):
+                classify_documents_with_ai([self.first], self.env, self.cache)
+        self.assertEqual(api.call_count, 2)
+
+    def test_review_is_retried_instead_of_reusing_cached_rejection(self):
+        with patch("semantic_classifier.extract_excerpt", return_value="Глюкоза 5.2"), patch("semantic_classifier.request_classification", side_effect=[{"category": "review"}, {"category": "lab", "title": "Анализы"}]) as api:
+            first = classify_documents_with_ai([self.first], self.env, self.cache)
+            second = classify_documents_with_ai([self.first], self.env, self.cache)
+        self.assertEqual(api.call_count, 2)
+        self.assertEqual(first[self.first].category, "review")
+        self.assertEqual(second[self.first].category, "lab")
+
+    def test_reference_filter_keeps_studies_and_originals_byte_identical(self):
+        from pypdf import PdfReader
+        for path in (self.first, self.second):
+            writer = PdfWriter()
+            for width in (111, 222, 333):
+                writer.add_blank_page(width=width, height=100)
+            with path.open("wb") as handle:
+                writer.write(handle)
+            writer.close()
+        originals = {path: path.read_bytes() for path in (self.first, self.second)}
+        decisions = {
+            self.first: DocumentClass("lab", "Анализы", "AI"),
+            self.second: DocumentClass("study", "Ангиоскан", "AI"),
         }
-        local = DocumentClass("review", "Требует-проверки",
-                              "неоднозначный набор проведённых процедур")
-        self.assertEqual(
-            _sanitize_classification(answer, excerpt, local).category, "review",
-        )
+        with patch("pdf_merger.ROOT", self.root), patch(
+            "semantic_classifier.classify_documents_with_ai", return_value=decisions
+        ), patch("semantic_classifier.select_lab_pages", return_value=(0, 2)) as filter_pages, redirect_stdout(StringIO()):
+            result = process(self.input, self.output, ai_classification="all", env_file=self.env,
+                             filter_lab_reference_pages=True)
+        self.assertEqual(result.groups_written, 2)
+        filter_pages.assert_called_once()
+        self.assertEqual(filter_pages.call_args.args[0], self.first)
+        self.assertEqual([int(p.mediabox.width) for p in PdfReader(self.output / "Анализы" / "2026.11.18-Анализы.pdf").pages], [111, 333])
+        self.assertEqual((self.output / "Обследования" / "2026.11.18-Ангиоскан.pdf").read_bytes(), originals[self.second])
+        for path, data in originals.items():
+            self.assertEqual(path.read_bytes(), data)
+
+    def test_page_filter_keeps_unrecognized_pages_and_requires_result(self):
+        from semantic_classifier import select_lab_pages
+        from ai_renamer import load_config
+        from unittest.mock import MagicMock
+        pages = []
+        for content in ("Глюкоза 5.2", "Общая справка", "Клинический комментарий"):
+            page = MagicMock()
+            page.extract_text.return_value = content
+            page.images = []
+            pages.append(page)
+        reader = MagicMock()
+        reader.pages = pages
+        reader.is_encrypted = False
+        cfg = load_config(self.env)
+        with patch("pypdf.PdfReader", return_value=reader), patch(
+            "semantic_classifier.request_classification",
+            side_effect=[{"category": "result"}, {"category": "reference_only"}, {"category": "retain"}]
+        ):
+            self.assertEqual(select_lab_pages(self.first, cfg), (0, 2))
+        with patch("pypdf.PdfReader", return_value=reader), patch(
+            "semantic_classifier.request_classification",
+            return_value={"category": "reference_only"}
+        ):
+            self.assertIsNone(select_lab_pages(self.first, cfg))
+
+    def test_page_filter_requires_explicit_ai_consent(self):
+        with self.assertRaises(ValueError):
+            process(self.input, self.output, filter_lab_reference_pages=True)
 
     def test_pii_header_can_be_trimmed_from_lis_export(self):
         doc = (
@@ -225,11 +271,11 @@ class SemanticClassifierTests(unittest.TestCase):
         self.assertEqual(result.groups_written, 2)
         self.assertEqual(api.call_count, 2)
         self.assertEqual(
-            (self.output / "Анализы" / "2026-11-18-Анализы.pdf").read_bytes(),
+            (self.output / "Анализы" / "2026.11.18-Анализы.pdf").read_bytes(),
             self.first.read_bytes(),
         )
         self.assertEqual(
-            (self.output / "Обследования" / "2026-11-18-Рентгенография грудной клетки.pdf").read_bytes(),
+            (self.output / "Обследования" / "2026.11.18-Рентгенография грудной клетки.pdf").read_bytes(),
             self.second.read_bytes(),
         )
         self.assertFalse((self.output / "На_проверку").exists())
@@ -250,7 +296,7 @@ class SemanticClassifierTests(unittest.TestCase):
                              ai_classification="review", env_file=self.env)
         self.assertEqual(api.call_count, 1)
         self.assertEqual(result.groups_written, 2)
-        self.assertTrue((self.output / "Анализы" / "2026-11-18-Анализы.pdf").exists())
+        self.assertTrue((self.output / "Анализы" / "2026.11.18-Анализы.pdf").exists())
 
 
 if __name__ == "__main__":

@@ -32,6 +32,9 @@ try {
         throw 'update-and-start.cmd должен находиться в корне клонированного PDF Merger.'
     }
 
+    $currentCommit = & $gitExe -C $ProjectRoot rev-parse --short HEAD
+    if ($LASTEXITCODE -eq 0) { Write-Host ('Текущая версия: {0}' -f $currentCommit) }
+
     # Changes to tracked files and untracked, non-ignored files must be
     # resolved manually; local ignored .env, input/, output/, and logs/ are safe.
     $changes = @(& $gitExe -C $ProjectRoot status --porcelain --untracked-files=normal)
@@ -68,6 +71,8 @@ try {
         throw 'После обновления не найден start.cmd; приложение не запущено.'
     }
     Write-Host ''
+    $currentCommit = & $gitExe -C $ProjectRoot rev-parse --short HEAD
+    if ($LASTEXITCODE -eq 0) { Write-Host ('Версия после обновления: {0}' -f $currentCommit) }
     Write-Host 'Обновление выполнено. Запуск PDF Merger...' -ForegroundColor Green
     & $StartCmd
     exit [int]$LASTEXITCODE

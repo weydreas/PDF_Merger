@@ -135,8 +135,8 @@ class WindowsConsoleFlowTests(unittest.TestCase):
         # Synthetic blank PDFs have no lab evidence: never mix them into a
         # daily bundle on the strength of their filename alone.
         folder = self.root / 'output' / 'На_проверку'
-        first = folder / '2026-03-02-Требует-проверки.pdf'
-        second = folder / '2026-03-02-Требует-проверки-02.pdf'
+        first = folder / '2026.03.02-Требует-проверки.pdf'
+        second = folder / '2026.03.02-Требует-проверки-02.pdf'
         self.assertTrue(first.exists())
         self.assertTrue(second.exists())
         self.assertEqual([int(page.mediabox.width) for page in PdfReader(first).pages], [111])
@@ -148,6 +148,23 @@ class WindowsConsoleFlowTests(unittest.TestCase):
         self.assertEqual([int(page.mediabox.width) for page in PdfReader(second).pages], [222])
 
 
+    def test_patient_menu_only_for_subfolders_and_never_mixes_patients(self):
+        self.assertEqual(self.invoke_ps('\n').returncode, 0)
+        for patient, width in [('A', 111), ('B', 222)]:
+            folder = self.root / 'input' / patient
+            folder.mkdir()
+            writer = PdfWriter()
+            writer.add_blank_page(width=width, height=100)
+            with (folder / '2026-11-25-test.pdf').open('wb') as handle:
+                writer.write(handle)
+            writer.close()
+        result = self.invoke_ps('2\n1\n')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('Выберите рабочую папку пациента', result.stdout)
+        output = self.root / 'output' / 'B' / 'На_проверку' / '2026.11.25-Требует-проверки.pdf'
+        self.assertEqual([int(p.mediabox.width) for p in PdfReader(output).pages], [222])
+        self.assertFalse((self.root / 'output' / 'A').exists())
+
     def test_existing_output_requires_explicit_overwrite_choice(self):
         self.assertEqual(self.invoke_ps('\n').returncode, 0)
         source = self.root / 'input' / '2026-11-17-Test.pdf'
@@ -158,7 +175,7 @@ class WindowsConsoleFlowTests(unittest.TestCase):
         writer.close()
         first = self.invoke_ps('1\n')
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
-        result = self.root / 'output' / 'На_проверку' / '2026-11-17-Требует-проверки.pdf'
+        result = self.root / 'output' / 'На_проверку' / '2026.11.17-Требует-проверки.pdf'
         self.assertTrue(result.exists())
         original_bytes = result.read_bytes()
 
@@ -204,7 +221,7 @@ class WindowsConsoleFlowTests(unittest.TestCase):
 
         # [3] explicitly enables AI for all files; no configured key = fail
         # closed before starting any new publishing or making any API request.
-        ai = self.invoke_ps('3\n2\n')
+        ai = self.invoke_ps('3\n0\n2\n')
         self.assertNotEqual(ai.returncode, 0)
         self.assertIn('AI-семантика: режим all', ai.stdout)
         self.assertIn('PDF_MERGER_API_KEY', ai.stdout + ai.stderr)

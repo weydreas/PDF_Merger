@@ -20,7 +20,7 @@ from document_router import DocumentClass, classify_document
 
 
 ROOT = Path(__file__).resolve().parent
-DATE_PREFIX = re.compile(r"^(\d{4}-\d{2}-\d{2})-(.+)$")
+DATE_PREFIX = re.compile(r"^(\d{4})([-.])(\d{2})\2(\d{2})-(.+)$")
 
 
 @dataclass
@@ -30,7 +30,8 @@ class Result:
     groups_failed: int = 0
     files_ignored: int = 0
     groups_planned: int = 0
-    files_renamed: int = 0
+    files_renamed: int = 0  # legacy: input is never renamed
+    files_dated: int = 0
     ai_unresolved: int = 0
 
 
@@ -54,7 +55,7 @@ def discover_groups(
         if not match:
             ignored.append(path)
             continue
-        candidate = match.group(1)
+        candidate = f"{match.group(1)}-{match.group(3)}-{match.group(4)}"
         try:
             date.fromisoformat(candidate)
         except ValueError:
@@ -95,30 +96,39 @@ def plan_outputs(
             elif classification.category == "study":
                 individual.append((day, path, "Обследования", classification.title))
             else:
-                individual.append((day, path, "На_проверку", "Требует-проверки"))
+                title = classification.title or "Требует-проверки"
+                if title != "Требует-проверки":
+                    title = f"{title}-Требует-проверки"
+                individual.append((day, path, "На_проверку", title))
 
     plans: list[tuple[Path, list[Path], str]] = []
     for day, paths in sorted(labs.items()):
-        plans.append((output_dir / "Анализы" / f"{day}-Анализы.pdf", paths, "Анализы"))
+        plans.append((output_dir / "Анализы" / f"{day.replace('-', '.')}-Анализы.pdf", paths, "Анализы"))
 
-    collisions: dict[tuple[str, str, str], int] = defaultdict(int)
+    # AI titles are free-form: a literal title ending in "-02" can collide
+    # with a suffix generated for another title. Reserve complete paths,
+    # case-insensitively on both platforms, before publishing any result.
+    occupied = {str(target).casefold() for target, _, _ in plans}
     for day, path, folder, title in individual:
-        key = (folder, day, title.casefold())
-        collisions[key] += 1
-        suffix = f"-{collisions[key]:02d}" if collisions[key] > 1 else ""
-        target = output_dir / folder / f"{day}-{title}{suffix}.pdf"
+        stem = f"{day.replace('-', '.')}-{title}"
+        target = output_dir / folder / f"{stem}.pdf"
+        counter = 2
+        while str(target).casefold() in occupied:
+            target = output_dir / folder / f"{stem}-{counter:02d}.pdf"
+            counter += 1
+        occupied.add(str(target).casefold())
         plans.append((target, [path], folder))
     return plans
 
 
-def _write_atomic(paths: list[Path], target: Path, overwrite: bool) -> None:
+def _write_atomic(paths: list[Path], target: Path, overwrite: bool, page_selections: dict[Path, tuple[int, ...]] | None = None) -> None:
     """Prepare output locally, validate it, then publish without partial files."""
     temp_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(mode="wb", prefix=f".{target.stem}-", suffix=".tmp", dir=target.parent, delete=False) as handle:
             temp_path = Path(handle.name)
 
-        if len(paths) == 1:
+        if len(paths) == 1 and not (page_selections or {}).get(paths[0]):
             # Keep lone PDFs byte-identical, including original metadata/signatures.
             expected_pages = len(PdfReader(str(paths[0]), strict=False).pages)
             shutil.copyfile(paths[0], temp_path)
@@ -130,8 +140,15 @@ def _write_atomic(paths: list[Path], target: Path, overwrite: bool) -> None:
                     reader = PdfReader(str(source), strict=False)
                     if reader.is_encrypted:
                         raise ValueError(f"Password-protected PDF: {source.name}")
-                    expected_pages += len(reader.pages)
-                    writer.append(reader, import_outline=False)
+                    selected = (page_selections or {}).get(source)
+                    if selected is not None:
+                        if not selected or tuple(sorted(set(selected))) != selected or selected[0] < 0 or selected[-1] >= len(reader.pages):
+                            raise ValueError("Invalid page selection")
+                        expected_pages += len(selected)
+                        writer.append(reader, pages=list(selected), import_outline=False)
+                    else:
+                        expected_pages += len(reader.pages)
+                        writer.append(reader, import_outline=False)
                 with temp_path.open("wb") as handle:
                     writer.write(handle)
             finally:
@@ -156,6 +173,9 @@ def _write_membership_report(
     entries: list[tuple[Path, Path | None, str, str]],
     input_dir: Path,
     output_dir: Path,
+    page_selections: dict[Path, tuple[int, ...]] | None = None,
+    classifications: dict[Path, DocumentClass] | None = None,
+    ai_paths: set[Path] | None = None,
 ) -> Path:
     """Write a local UTF-8 Excel-friendly audit; never claim skipped items merged.
 
@@ -175,7 +195,7 @@ def _write_membership_report(
             writer = csv.writer(stream, delimiter=";")
             writer.writerow([
                 "Исходный PDF", "Категория", "Итоговый файл",
-                "Статус операции", "Подтверждено включение",
+                "Статус операции", "Подтверждено включение", "Сохранённые страницы (номера с 1)", "Источник классификации", "Причина классификации",
             ])
             for source, destination, category, status in entries:
                 included = (
@@ -187,6 +207,9 @@ def _write_membership_report(
                     str(source.relative_to(input_dir)), category,
                     str(destination.relative_to(output_dir)) if destination else "",
                     status, included,
+                    ",".join(str(i + 1) for i in (page_selections or {}).get(source, ())) if status == "СОЗДАНО" else "",
+                    "AI" if source in (ai_paths or set()) else "Локально" if source in (classifications or {}) else "",
+                    (classifications or {})[source].reason if source in (classifications or {}) else "",
                 ])
         os.replace(temporary, target)
         temporary = None
@@ -196,11 +219,55 @@ def _write_membership_report(
             temporary.unlink(missing_ok=True)
 
 
+def _previous_generated_targets(output_dir: Path) -> set[Path]:
+    """Only trust outputs explicitly confirmed by a prior local membership report."""
+    report = output_dir / "Состав_результатов.csv"
+    targets: set[Path] = set()
+    try:
+        if report.is_symlink():
+            return targets
+        with report.open(encoding="utf-8-sig", newline="") as stream:
+            for row in csv.DictReader(stream, delimiter=";"):
+                if row.get("Статус операции") != "СОЗДАНО":
+                    continue
+                relative = Path(row.get("Итоговый файл") or "")
+                if (relative.is_absolute() or len(relative.parts) != 2
+                        or relative.parts[0] not in ("Анализы", "Обследования", "На_проверку")
+                        or relative.name in ("", "..") or relative.suffix.lower() != ".pdf"):
+                    continue
+                target = output_dir / relative
+                if target.is_file() and not target.is_symlink() and not target.parent.is_symlink():
+                    if target.resolve().is_relative_to(output_dir.resolve()):
+                        targets.add(target)
+    except (OSError, ValueError, csv.Error):
+        pass
+    return targets
+
+
+def _archive_stale_outputs(output_dir: Path, stale: set[Path]) -> None:
+    if not stale:
+        return
+    archive_root = output_dir / "_previous"
+    if archive_root.is_symlink():
+        raise OSError("Archive directory is a link")
+    archive_root.mkdir(exist_ok=True)
+    archive = Path(tempfile.mkdtemp(prefix="run-", dir=archive_root))
+    for source in sorted(stale):
+        relative = source.relative_to(output_dir)
+        destination = archive / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if source.is_symlink() or source.parent.is_symlink():
+            raise OSError("Managed output changed into a link")
+        source.rename(destination)
+        print(f"  Прежний автоматически созданный результат перенесён в _previous: {relative}")
+
+
 def process(
     input_dir: Path, output_dir: Path, *, overwrite: bool = False,
     dry_run: bool = False, recursive: bool = False,
     rename_with_ai: bool = False, env_file: Path | None = None,
     ai_classification: str | None = None,
+    filter_lab_reference_pages: bool = False,
 ) -> Result:
     input_dir = input_dir.resolve()
     output_dir = output_dir.resolve()
@@ -210,12 +277,14 @@ def process(
         raise ValueError("Input and output directories must differ")
     if ai_classification not in (None, "review", "all"):
         raise ValueError("Invalid AI classification mode")
+    if filter_lab_reference_pages and not ai_classification:
+        raise ValueError("Reference page filtering requires explicit AI classification")
 
     name_overrides: dict[Path, str] = {}
     renamed = 0
     unresolved = []
     if rename_with_ai:
-        from ai_renamer import AIProgressLog, apply_renames, plan_renames
+        from ai_renamer import AIProgressLog, plan_renames
 
         _, needs_renaming = discover_groups(input_dir, output_dir, recursive=recursive)
         if needs_renaming:
@@ -230,6 +299,7 @@ def process(
                 planned = plan_renames(
                     needs_renaming, input_dir, env_file or ROOT / ".env",
                     progress=progress, unresolved=unresolved,
+                    cache_file=None if dry_run else ROOT / 'logs' / 'ai-date-cache.json',
                 )
             except (OSError, ValueError):
                 progress("Проверка остановлена: планирование не завершено, исходные имена сохранены.")
@@ -248,23 +318,11 @@ def process(
                     flush=True,
                 )
             for original, proposed in planned.items():
-                action = "ПЛАН AI" if dry_run else "AI-ПЕРЕИМЕНОВАНИЕ"
+                action = "ПЛАН AI" if dry_run else "AI-ПЛАН ИМЕНИ"
                 print(f"{action}: {original.relative_to(input_dir)} -> {proposed.relative_to(input_dir)}")
-            if dry_run:
-                progress("Режим проверки: файловая система не менялась.")
-                name_overrides = {old: new.name for old, new in planned.items()}
-            else:
-                progress(f"Начало изменения имён {len(planned)} файлов в input.")
-                try:
-                    apply_renames(planned)
-                except (OSError, ValueError):
-                    progress("ОШИБКА файловой операции. Проверьте input: часть имён могла измениться.")
-                    raise
-                renamed = len(planned)
-                progress(
-                    f"Переименование завершено: {renamed} файлов. "
-                    + ("Итоговые PDF отложены из-за неподтверждённых дат." if unresolved else "Переход к объединению.")
-                )
+            name_overrides = {old: new.name for old, new in planned.items()}
+            renamed = 0
+            progress(f"Подтверждено дат: {len(planned)}. Исходные имена и содержимое PDF сохранены.")
 
     groups, ignored = discover_groups(input_dir, output_dir, recursive=recursive, name_overrides=name_overrides)
     classifications: dict[Path, DocumentClass] = {}
@@ -294,28 +352,45 @@ def process(
                 ROOT / "logs" / "ai-classification-cache.json",
                 progress=progress,
             )
+    page_selections: dict[Path, tuple[int, ...]] = {}
+    if filter_lab_reference_pages and classifications:
+        from ai_renamer import AIProgressLog, load_config
+        from semantic_classifier import select_lab_pages
+        lab_paths = [path for path, decision in classifications.items() if decision.category == "lab"]
+        if lab_paths:
+            cfg = load_config(env_file or ROOT / ".env")
+            progress = AIProgressLog(ROOT / "logs" / "ai-progress.log")
+            for path in lab_paths:
+                selected = select_lab_pages(path, cfg, progress)
+                if selected is not None:
+                    page_selections[path] = selected
+    ai_decided = set(classifications)
+    for paths in groups.values():
+        for path in paths:
+            if path not in classifications:
+                classifications[path] = classify_document(path, effective_name=name_overrides.get(path, path.name))
     plans = plan_outputs(
         groups, input_dir, output_dir, name_overrides=name_overrides,
         classifications=classifications,
     )
     result = Result(
         files_ignored=len(ignored), groups_planned=len(plans),
-        files_renamed=renamed, ai_unresolved=len(unresolved),
+        files_renamed=renamed, files_dated=0 if dry_run else len(name_overrides), ai_unresolved=len(unresolved),
     )
     report_entries: list[tuple[Path, Path | None, str, str]] = [
         (path, None, "Не обработано", "НЕКОРРЕКТНАЯ_ДАТА")
         for path in ignored
     ]
     for path in ignored:
-        print(f"ПРОПУЩЕН (нет корректной даты YYYY-MM-DD-): {path.relative_to(input_dir)}")
+        print(f"ПРОПУЩЕН (нет корректной даты YYYY-MM-DD- или YYYY.MM.DD-): {path.relative_to(input_dir)}")
     if unresolved and not dry_run:
         print(
-            "\nНЕПОЛНАЯ AI-ПРОВЕРКА: документы с подтверждённой датой переименованы, "
+            "\nНЕПОЛНАЯ AI-ПРОВЕРКА: даты подтверждённых документов сохранены в локальном кэше, "
             "но создание итоговых PDF отложено до проверки оставшихся файлов."
         )
         print(
-            "При следующем запуске AI потребуется только для файлов без "
-            "правильного YYYY-MM-DD- имени. Исходные PDF и прежний output сохранены."
+            "При следующем запуске подтверждённые даты могут использоваться из кэша. "
+            "Исходные PDF и прежний output сохранены."
         )
         return result
 
@@ -326,11 +401,12 @@ def process(
     # Legacy mixed outputs in the root are preserved, never read as source or
     # treated as proof that new structured outputs were already produced.
     if output_dir.is_dir() and any(
-        re.fullmatch(r"\d{4}-\d{2}-\d{2}\.pdf", p.name) for p in output_dir.iterdir() if p.is_file()
+        re.fullmatch(r"\d{4}[-.]\d{2}[-.]\d{2}\.pdf", p.name) for p in output_dir.iterdir() if p.is_file()
     ):
         print("ВНИМАНИЕ: старые объединённые PDF в корне output сохранены без изменений.")
         print("Новые раздельные результаты будут записаны в подпапки Анализы, Обследования, На_проверку.")
 
+    prior_generated = _previous_generated_targets(output_dir) if overwrite and not dry_run else set()
     for target, paths, category in plans:
         print(f"\n{category}: {len(paths)} PDF -> {target.relative_to(output_dir)}")
         for index, source in enumerate(paths, start=1):
@@ -352,7 +428,11 @@ def process(
             continue
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
-            _write_atomic(paths, target, overwrite=overwrite)
+            selected_for_target = {path: page_selections[path] for path in paths if category == "Анализы" and path in page_selections}
+            if selected_for_target:
+                _write_atomic(paths, target, overwrite=overwrite, page_selections=selected_for_target)
+            else:
+                _write_atomic(paths, target, overwrite=overwrite)
         except FileExistsError:
             print("  ПРОПУЩЕНО: результат уже создан другим процессом")
             report_entries.extend(
@@ -362,6 +442,8 @@ def process(
             result.groups_skipped += 1
         except Exception as exc:
             print(f"  ОШИБКА: {type(exc).__name__}: {exc}", file=sys.stderr)
+            if isinstance(exc, PermissionError):
+                print(f"  Проверьте права доступа и закройте PDF/CSV в редакторе: {target.relative_to(output_dir)}", file=sys.stderr)
             report_entries.extend(
                 (source, target, category, "ОШИБКА")
                 for source in paths
@@ -376,9 +458,14 @@ def process(
             result.groups_written += 1
 
     if not dry_run:
+        if overwrite and not result.groups_failed and not result.groups_skipped and not ignored:
+            try:
+                _archive_stale_outputs(output_dir, prior_generated - {target for target, _, _ in plans})
+            except OSError as exc:
+                print(f"ПРЕДУПРЕЖДЕНИЕ: прежние результаты не полностью архивированы: {type(exc).__name__}. Проверьте output и _previous.", file=sys.stderr)
         try:
             report_path = _write_membership_report(
-                report_entries, input_dir, output_dir
+                report_entries, input_dir, output_dir, page_selections, classifications, ai_decided
             )
         except OSError as exc:
             # A nonessential CSV export cannot interrupt PDF creation.
@@ -408,7 +495,7 @@ def process(
     print(
         f"\nИтог: {result.groups_written} создано; {result.groups_skipped} пропущено; "
         f"{result.groups_failed} ошибок; {result.files_ignored} PDF с некорректной датой; "
-        f"{result.files_renamed} переименовано AI; "
+        f"{result.files_dated} дат подтверждено AI; "
         f"{result.ai_unresolved} требуют проверки даты."
     )
     return result
@@ -423,11 +510,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--recursive", action="store_true", help="Include subfolders of input")
     parser.add_argument("--overwrite", action="store_true", help="Replace existing merged files")
     parser.add_argument("--dry-run", action="store_true", help="Preview groups without writing; AI mode may still send text to API")
-    parser.add_argument("--rename-with-ai", action="store_true", help="Opt in to sending excerpts of wrongly named PDFs to external AI; rename them before merging")
+    parser.add_argument("--rename-with-ai", action="store_true", help="Opt in to identifying dates via AI without renaming original PDFs")
     parser.add_argument(
         "--classify-with-ai", choices=("review", "all"),
         help="Explicitly authorize external AI to classify review-only or all dated PDFs. May send medical text and incur API charges; uses local hash cache.",
     )
+    parser.add_argument("--filter-lab-reference-pages", action="store_true", help="Explicit consent to send individual text pages of AI-confirmed lab PDFs for reference-only filtering; original files stay unchanged")
     parser.add_argument("--env-file", type=Path, default=ROOT / ".env", help="AI settings file (default: ./.env)")
     parser.add_argument("--check-names", action="store_true", help="Validate PDF names locally; returns 3 if AI preflight is needed")
     args = parser.parse_args(argv)
@@ -446,6 +534,7 @@ def main(argv: list[str] | None = None) -> int:
             dry_run=args.dry_run, recursive=args.recursive,
             rename_with_ai=args.rename_with_ai, env_file=args.env_file,
             ai_classification=args.classify_with_ai,
+            filter_lab_reference_pages=args.filter_lab_reference_pages,
         )
     except (OSError, ValueError) as exc:
         print(f"ОШИБКА: {exc}", file=sys.stderr)
