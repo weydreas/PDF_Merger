@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 import json
+import hashlib
+import tempfile
 import os
 from pathlib import Path
 from collections.abc import Callable
@@ -27,6 +29,7 @@ DEFAULT_MODEL = "gpt-6-luna"
 MAX_TEXT_CHARS = 10_000
 MAX_RESPONSE_BYTES = 128_000
 API_TIMEOUT_SECONDS = 30
+DATE_CACHE_VERSION = 1
 DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 DATE_IN_EVIDENCE = re.compile(
     r"(?<!\d)(?:(\d{4})[-./](\d{1,2})[-./](\d{1,2})|(\d{1,2})[-./](\d{1,2})[-./](\d{4}))(?!\d)"
@@ -278,6 +281,7 @@ def plan_renames(
     paths: list[Path], input_dir: Path, env_file: Path,
     progress: Callable[[str], None] | None = None,
     *, unresolved: list[UnresolvedDocument] | None = None,
+    cache_file: Path | None = None,
 ) -> dict[Path, Path]:
     """Plan safe renames; optionally skip unverified dates for batch processing.
 
@@ -289,6 +293,14 @@ def plan_renames(
         return {}
     cfg = load_config(env_file)
     planned: dict[Path, Path] = {}
+    date_cache: dict = {}
+    if cache_file is not None:
+        try:
+            stored = json.loads(cache_file.read_text(encoding="utf-8"))
+            if isinstance(stored, dict):
+                date_cache = stored
+        except (OSError, ValueError):
+            pass
     # Include all existing file names in source folders, even non-PDF names.
     occupied: set[str] = set()
     for directory in {p.parent for p in paths}:
@@ -307,19 +319,67 @@ def plan_renames(
                     "PDF не содержит извлекаемого текста, а имя — подтверждённой даты. "
                     "Вероятно, это скан без текстового слоя; нужен OCR. AI API не вызывался."
                 )
+            cache_key = None
+            if cache_file is not None:
+                # The key includes the source identity and all date inputs;
+                # no original filename, excerpt, API key or patient ID is stored.
+                digest = hashlib.sha256()
+                for value in (str(DATE_CACHE_VERSION), cfg.model, cfg.api_url, str(path.resolve()), excerpt):
+                    digest.update(value.encode("utf-8"))
+                    digest.update(b"\x00")
+                with path.open("rb") as stream:
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                cache_key = digest.hexdigest()
+            cached_day = date_cache.get(cache_key) if cache_key else None
             stage = "ожидание API"
-            if progress:
-                safe_model = cfg.model if cfg.model in ("gpt-6-luna", "gpt-4o-mini") else "(модель из конфигурации)"
-                progress(
-                    f"{prefix}: запрос к AI (модель: {safe_model}, "
-                    f"сетевой тайм-аут: {API_TIMEOUT_SECONDS} с)."
-                )
-            request_started = time.monotonic()
-            suggestion = request_suggestion(cfg, path.name, excerpt)
-            if progress:
-                progress(f"{prefix}: ответ AI за {time.monotonic() - request_started:.1f} с, проверка даты.")
-            stage = "проверка ответа и даты"
-            day = _verified_date(suggestion.get("date"), suggestion.get("evidence"), path.name + "\n" + excerpt)
+            if cached_day is not None:
+                try:
+                    day = _verified_date(cached_day, cached_day, path.name + "\n" + excerpt)
+                except DateVerificationError:
+                    # Other supported date formats must also match the original text.
+                    day = None
+                    for date_match in DATE_IN_EVIDENCE.finditer(path.name + "\n" + excerpt):
+                        try:
+                            day = _verified_date(cached_day, date_match.group(0), path.name + "\n" + excerpt)
+                            break
+                        except DateVerificationError:
+                            pass
+                if day is not None and progress:
+                    progress(f"{prefix}: дата подтверждена локальным кэшем.")
+            else:
+                day = None
+            if day is None:
+                if progress:
+                    safe_model = cfg.model if cfg.model in ("gpt-6-luna", "gpt-4o-mini") else "(модель из конфигурации)"
+                    progress(
+                        f"{prefix}: запрос к AI (модель: {safe_model}, "
+                        f"сетевой тайм-аут: {API_TIMEOUT_SECONDS} с)."
+                    )
+                request_started = time.monotonic()
+                suggestion = request_suggestion(cfg, path.name, excerpt)
+                if progress:
+                    progress(f"{prefix}: ответ AI за {time.monotonic() - request_started:.1f} с, проверка даты.")
+                stage = "проверка ответа и даты"
+                day = _verified_date(suggestion.get("date"), suggestion.get("evidence"), path.name + "\n" + excerpt)
+                if cache_key and cache_file is not None:
+                    date_cache[cache_key] = day
+                    temp = None
+                    try:
+                        cache_file.parent.mkdir(parents=True, exist_ok=True)
+                        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=cache_file.parent, delete=False) as handle:
+                            temp = Path(handle.name)
+                            json.dump(date_cache, handle)
+                        os.replace(temp, cache_file)
+                    except OSError:
+                        if progress:
+                            progress(f"{prefix}: кэш даты недоступен.")
+                    finally:
+                        if temp is not None:
+                            try:
+                                temp.unlink(missing_ok=True)
+                            except OSError:
+                                pass
             # The AI may misname an X-ray as "tests"; verified local modality
             # signals override broad or misleading AI titles.
             from document_router import classify_text
