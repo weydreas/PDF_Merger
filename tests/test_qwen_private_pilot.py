@@ -64,6 +64,18 @@ class PrivateQwenPilotTests(unittest.TestCase):
             with self.subTest(endpoint=endpoint), self.assertRaises(pilot.PilotError):
                 pilot.private_endpoint(endpoint)
 
+    def test_deployed_model_alias_requires_matching_metadata(self):
+        item = {"id": "/models/model.gguf", "meta": {
+            "n_ctx": 16384, "n_params": 2031739904, "size": 1276487680,
+            "n_vocab": 151936, "n_embd": 2048, "ftype": "Q4_K - Medium",
+        }}
+        self.assertEqual(pilot.verified_model({"data": [item]}), item["id"])
+        for key, value in (("n_ctx", 32768), ("n_params", 4000000000), ("size", 1)):
+            wrong = copy.deepcopy(item)
+            wrong["meta"][key] = value
+            with self.subTest(key=key), self.assertRaises(pilot.PilotError):
+                pilot.verified_model({"data": [wrong]})
+
     def test_truncated_reply_rejected(self):
         with patch.object(pilot, "request_json", return_value={"choices": [{"finish_reason": "length", "message": {"content": "{}"}}]}):
             with self.assertRaises(pilot.PilotError):
