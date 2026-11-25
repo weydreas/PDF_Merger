@@ -1,6 +1,6 @@
 """Synthetic-only pilot for the three local Qwen tasks. No PDF or patient input.
 
-Run on the Qwen host, not on a staff workstation. Fixed loopback endpoint,
+Run on the Qwen host, not on a staff workstation. Explicit private IPv4 endpoint,
 no proxies, no redirects and no cloud fallback. A valid answer is a proposal,
 NOT a verified anonymization or permission to export a document.
 """
@@ -9,11 +9,26 @@ from __future__ import annotations
 import argparse
 from datetime import date
 import json
+import ipaddress
+import os
 import re
 import sys
 import urllib.request
+import urllib.parse
 
-ENDPOINT = "http://127.0.0.1:18081"
+def private_endpoint(raw):
+    try:
+        url = urllib.parse.urlsplit(raw)
+        ip = ipaddress.IPv4Address(url.hostname or "")
+        if (url.scheme not in ("http", "https") or url.username or url.password
+                or url.path not in ("", "/", "/v1", "/v1/") or url.query or url.fragment
+                or url.port is None or not any(ip in ipaddress.IPv4Network(net) for net in
+                    ("127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))):
+            raise ValueError
+        return f"{url.scheme}://{ip}:{url.port}"
+    except (ValueError, TypeError):
+        raise PilotError("explicit private IPv4 endpoint required") from None
+
 MAX_REPLY = 1_000_000
 
 # Fictional fixtures, with geometry shaped like the AI Lab EasyOCR worker.
@@ -157,7 +172,8 @@ def request_json(path, payload=None):
         raise PilotError("invalid local route")
     data = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
-    req = urllib.request.Request(ENDPOINT + path, data=data, headers={"Content-Type": "application/json"})
+    endpoint = private_endpoint(os.environ.get("PDF_MERGER_LOCAL_QWEN_URL", ""))
+    req = urllib.request.Request(endpoint + path, data=data, headers={"Content-Type": "application/json"})
     with opener.open(req, timeout=180) as response:
         raw = response.read(MAX_REPLY + 1)
     if len(raw) > MAX_REPLY:
@@ -205,9 +221,9 @@ def main():
         if len(models) != 1 or not isinstance(models[0]["id"], str):
             raise PilotError("expected exactly one local model")
         model = models[0]["id"]
-        # Never silently benchmark the chatbot's 1.7B or an unrelated model.
-        if not re.search(r"qwen", model, re.I) or not re.search(r"(?<!\d)4b(?!\d)", model, re.I):
-            raise PilotError("local model ID does not identify Qwen 4B")
+        # Never silently benchmark a different model.
+        if not re.search(r"qwen", model, re.I) or not re.search(r"(?<!\d)1[._-]7b(?!\d)", model, re.I):
+            raise PilotError("local model ID does not identify Qwen 1.7B")
         passed = True
         names = FIXTURES if args.case == "all" else [args.case]
         for name in names:
