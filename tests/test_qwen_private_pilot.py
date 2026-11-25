@@ -121,6 +121,27 @@ class PrivateQwenPilotTests(unittest.TestCase):
         self.assertIn('"classification": {"passed": 1, "total": 1}', output.getvalue())
         self.assertIn('"date": {"passed": 1, "total": 1}', output.getvalue())
 
+    def test_v3_date_quote_contract(self):
+        reply = {"date": "2026-11-25", "date_evidence": "p1-r3", "source_date": "25.11.2026"}
+        self.assertEqual(pilot.validate_date_v3(reply, self.regions), reply)
+        for bad in (dict(reply, date="2026-11-24"), dict(reply, date_evidence="p1-r2")):
+            with self.assertRaises(pilot.PilotError):
+                pilot.validate_date_v3(bad, self.regions)
+
+    def test_v3_genres_include_epicrisis_and_consultation(self):
+        for name in ("discharge", "consult", "short_discharge"):
+            fixture = pilot.GENRE_FIXTURES[name]
+            reply = {"category": fixture["expected_category"], "category_evidence": ["p1-r1"]}
+            self.assertEqual(pilot.validate_genre(reply, pilot.regions_for(fixture)), reply)
+
+    def test_v3_features_require_known_evidence(self):
+        reply = {key: {"status": "no", "evidence": []} for key in pilot.FEATURE_KEYS}
+        reply["lab_report"] = {"status": "yes", "evidence": ["p1-r4"]}
+        pilot.validate_features(reply, self.regions)
+        reply["lab_report"]["evidence"] = []
+        with self.assertRaises(pilot.PilotError):
+            pilot.validate_features(reply, self.regions)
+
     def test_truncated_reply_rejected(self):
         with patch.object(pilot, "request_json", return_value={"choices": [{"finish_reason": "length", "message": {"content": "{}"}}]}):
             with self.assertRaises(pilot.PilotError):
